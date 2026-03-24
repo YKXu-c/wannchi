@@ -1,0 +1,304 @@
+<!DOCTYPE html><html><head>
+      <title>hrJS_plan_reference</title>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      
+      <link rel="stylesheet" href="file:////Users/ykxu/.vscode/extensions/shd101wyy.markdown-preview-enhanced-0.8.22/crossnote/dependencies/katex/katex.min.css">
+      
+      
+      
+      
+      
+      <style>
+      code[class*=language-],pre[class*=language-]{color:#333;background:0 0;font-family:Consolas,"Liberation Mono",Menlo,Courier,monospace;text-align:left;white-space:pre;word-spacing:normal;word-break:normal;word-wrap:normal;line-height:1.4;-moz-tab-size:8;-o-tab-size:8;tab-size:8;-webkit-hyphens:none;-moz-hyphens:none;-ms-hyphens:none;hyphens:none}pre[class*=language-]{padding:.8em;overflow:auto;border-radius:3px;background:#f5f5f5}:not(pre)>code[class*=language-]{padding:.1em;border-radius:.3em;white-space:normal;background:#f5f5f5}.token.blockquote,.token.comment{color:#969896}.token.cdata{color:#183691}.token.doctype,.token.macro.property,.token.punctuation,.token.variable{color:#333}.token.builtin,.token.important,.token.keyword,.token.operator,.token.rule{color:#a71d5d}.token.attr-value,.token.regex,.token.string,.token.url{color:#183691}.token.atrule,.token.boolean,.token.code,.token.command,.token.constant,.token.entity,.token.number,.token.property,.token.symbol{color:#0086b3}.token.prolog,.token.selector,.token.tag{color:#63a35c}.token.attr-name,.token.class,.token.class-name,.token.function,.token.id,.token.namespace,.token.pseudo-class,.token.pseudo-element,.token.url-reference .token.variable{color:#795da3}.token.entity{cursor:help}.token.title,.token.title .token.punctuation{font-weight:700;color:#1d3e81}.token.list{color:#ed6a43}.token.inserted{background-color:#eaffea;color:#55a532}.token.deleted{background-color:#ffecec;color:#bd2c00}.token.bold{font-weight:700}.token.italic{font-style:italic}.language-json .token.property{color:#183691}.language-markup .token.tag .token.punctuation{color:#333}.language-css .token.function,code.language-css{color:#0086b3}.language-yaml .token.atrule{color:#63a35c}code.language-yaml{color:#183691}.language-ruby .token.function{color:#333}.language-markdown .token.url{color:#795da3}.language-makefile .token.symbol{color:#795da3}.language-makefile .token.variable{color:#183691}.language-makefile .token.builtin{color:#0086b3}.language-bash .token.keyword{color:#0086b3}pre[data-line]{position:relative;padding:1em 0 1em 3em}pre[data-line] .line-highlight-wrapper{position:absolute;top:0;left:0;background-color:transparent;display:block;width:100%}pre[data-line] .line-highlight{position:absolute;left:0;right:0;padding:inherit 0;margin-top:1em;background:hsla(24,20%,50%,.08);background:linear-gradient(to right,hsla(24,20%,50%,.1) 70%,hsla(24,20%,50%,0));pointer-events:none;line-height:inherit;white-space:pre}pre[data-line] .line-highlight:before,pre[data-line] .line-highlight[data-end]:after{content:attr(data-start);position:absolute;top:.4em;left:.6em;min-width:1em;padding:0 .5em;background-color:hsla(24,20%,50%,.4);color:#f4f1ef;font:bold 65%/1.5 sans-serif;text-align:center;vertical-align:.3em;border-radius:999px;text-shadow:none;box-shadow:0 1px #fff}pre[data-line] .line-highlight[data-end]:after{content:attr(data-end);top:auto;bottom:.4em}html body{font-family:'Helvetica Neue',Helvetica,'Segoe UI',Arial,freesans,sans-serif;font-size:16px;line-height:1.6;color:#333;background-color:#fff;overflow:initial;box-sizing:border-box;word-wrap:break-word}html body>:first-child{margin-top:0}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{line-height:1.2;margin-top:1em;margin-bottom:16px;color:#000}html body h1{font-size:2.25em;font-weight:300;padding-bottom:.3em}html body h2{font-size:1.75em;font-weight:400;padding-bottom:.3em}html body h3{font-size:1.5em;font-weight:500}html body h4{font-size:1.25em;font-weight:600}html body h5{font-size:1.1em;font-weight:600}html body h6{font-size:1em;font-weight:600}html body h1,html body h2,html body h3,html body h4,html body h5{font-weight:600}html body h5{font-size:1em}html body h6{color:#5c5c5c}html body strong{color:#000}html body del{color:#5c5c5c}html body a:not([href]){color:inherit;text-decoration:none}html body a{color:#08c;text-decoration:none}html body a:hover{color:#00a3f5;text-decoration:none}html body img{max-width:100%}html body>p{margin-top:0;margin-bottom:16px;word-wrap:break-word}html body>ol,html body>ul{margin-bottom:16px}html body ol,html body ul{padding-left:2em}html body ol.no-list,html body ul.no-list{padding:0;list-style-type:none}html body ol ol,html body ol ul,html body ul ol,html body ul ul{margin-top:0;margin-bottom:0}html body li{margin-bottom:0}html body li.task-list-item{list-style:none}html body li>p{margin-top:0;margin-bottom:0}html body .task-list-item-checkbox{margin:0 .2em .25em -1.8em;vertical-align:middle}html body .task-list-item-checkbox:hover{cursor:pointer}html body blockquote{margin:16px 0;font-size:inherit;padding:0 15px;color:#5c5c5c;background-color:#f0f0f0;border-left:4px solid #d6d6d6}html body blockquote>:first-child{margin-top:0}html body blockquote>:last-child{margin-bottom:0}html body hr{height:4px;margin:32px 0;background-color:#d6d6d6;border:0 none}html body table{margin:10px 0 15px 0;border-collapse:collapse;border-spacing:0;display:block;width:100%;overflow:auto;word-break:normal;word-break:keep-all}html body table th{font-weight:700;color:#000}html body table td,html body table th{border:1px solid #d6d6d6;padding:6px 13px}html body dl{padding:0}html body dl dt{padding:0;margin-top:16px;font-size:1em;font-style:italic;font-weight:700}html body dl dd{padding:0 16px;margin-bottom:16px}html body code{font-family:Menlo,Monaco,Consolas,'Courier New',monospace;font-size:.85em;color:#000;background-color:#f0f0f0;border-radius:3px;padding:.2em 0}html body code::after,html body code::before{letter-spacing:-.2em;content:'\00a0'}html body pre>code{padding:0;margin:0;word-break:normal;white-space:pre;background:0 0;border:0}html body .highlight{margin-bottom:16px}html body .highlight pre,html body pre{padding:1em;overflow:auto;line-height:1.45;border:#d6d6d6;border-radius:3px}html body .highlight pre{margin-bottom:0;word-break:normal}html body pre code,html body pre tt{display:inline;max-width:initial;padding:0;margin:0;overflow:initial;line-height:inherit;word-wrap:normal;background-color:transparent;border:0}html body pre code:after,html body pre code:before,html body pre tt:after,html body pre tt:before{content:normal}html body blockquote,html body dl,html body ol,html body p,html body pre,html body ul{margin-top:0;margin-bottom:16px}html body kbd{color:#000;border:1px solid #d6d6d6;border-bottom:2px solid #c7c7c7;padding:2px 4px;background-color:#f0f0f0;border-radius:3px}@media print{html body{background-color:#fff}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{color:#000;page-break-after:avoid}html body blockquote{color:#5c5c5c}html body pre{page-break-inside:avoid}html body table{display:table}html body img{display:block;max-width:100%;max-height:100%}html body code,html body pre{word-wrap:break-word;white-space:pre}}.markdown-preview{width:100%;height:100%;box-sizing:border-box}.markdown-preview ul{list-style:disc}.markdown-preview ul ul{list-style:circle}.markdown-preview ul ul ul{list-style:square}.markdown-preview ol{list-style:decimal}.markdown-preview ol ol,.markdown-preview ul ol{list-style-type:lower-roman}.markdown-preview ol ol ol,.markdown-preview ol ul ol,.markdown-preview ul ol ol,.markdown-preview ul ul ol{list-style-type:lower-alpha}.markdown-preview .newpage,.markdown-preview .pagebreak{page-break-before:always}.markdown-preview pre.line-numbers{position:relative;padding-left:3.8em;counter-reset:linenumber}.markdown-preview pre.line-numbers>code{position:relative}.markdown-preview pre.line-numbers .line-numbers-rows{position:absolute;pointer-events:none;top:1em;font-size:100%;left:0;width:3em;letter-spacing:-1px;border-right:1px solid #999;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none}.markdown-preview pre.line-numbers .line-numbers-rows>span{pointer-events:none;display:block;counter-increment:linenumber}.markdown-preview pre.line-numbers .line-numbers-rows>span:before{content:counter(linenumber);color:#999;display:block;padding-right:.8em;text-align:right}.markdown-preview .mathjax-exps .MathJax_Display{text-align:center!important}.markdown-preview:not([data-for=preview]) .code-chunk .code-chunk-btn-group{display:none}.markdown-preview:not([data-for=preview]) .code-chunk .status{display:none}.markdown-preview:not([data-for=preview]) .code-chunk .output-div{margin-bottom:16px}.markdown-preview .md-toc{padding:0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link div,.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link p{display:inline}.markdown-preview .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}.scrollbar-style::-webkit-scrollbar{width:8px}.scrollbar-style::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}.scrollbar-style::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,.66);border:4px solid rgba(150,150,150,.66);background-clip:content-box}html body[for=html-export]:not([data-presentation-mode]){position:relative;width:100%;height:100%;top:0;left:0;margin:0;padding:0;overflow:auto}html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{position:relative;top:0;min-height:100vh}@media screen and (min-width:914px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{padding:2em calc(50% - 457px + 2em)}}@media screen and (max-width:914px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{font-size:14px!important;padding:1em}}@media print{html body[for=html-export]:not([data-presentation-mode]) #sidebar-toc-btn{display:none}}html body[for=html-export]:not([data-presentation-mode]) #sidebar-toc-btn{position:fixed;bottom:8px;left:8px;font-size:28px;cursor:pointer;color:inherit;z-index:99;width:32px;text-align:center;opacity:.4}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] #sidebar-toc-btn{opacity:1}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc{position:fixed;top:0;left:0;width:300px;height:100%;padding:32px 0 48px 0;font-size:14px;box-shadow:0 0 4px rgba(150,150,150,.33);box-sizing:border-box;overflow:auto;background-color:inherit}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar{width:8px}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,.66);border:4px solid rgba(150,150,150,.66);background-clip:content-box}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc a{text-decoration:none}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc{padding:0 16px}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link div,html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link p{display:inline}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{left:300px;width:calc(100% - 300px);padding:2em calc(50% - 457px - 300px / 2);margin:0;box-sizing:border-box}@media screen and (max-width:1274px){html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{width:100%}}html body[for=html-export]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .markdown-preview{left:50%;transform:translateX(-50%)}html body[for=html-export]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .md-sidebar-toc{display:none}
+/* Please visit the URL below for more information: */
+/*   https://shd101wyy.github.io/markdown-preview-enhanced/#/customize-css */
+
+      </style>
+      <script type="text/javascript">
+  document.addEventListener("DOMContentLoaded", function () {
+    // your code here
+  });
+</script>
+    </head>
+    <body for="html-export">
+      <div class="crossnote markdown-preview  ">
+      
+<h1 id="hrjs-plan-reference">hrJS Plan Reference </h1>
+<blockquote>
+<p>本文档为 wanneff_JS/bayesian/classical_mc/ahc_calc 模块的完整设计方案存档。<br>
+实际执行状态：所有 Python 测试通过（Test 5 待 Fortran 编译后运行）。</p>
+</blockquote>
+<hr>
+<h2 id="项目背景">项目背景 </h2>
+<p>hrJS/wannchi 项目基于 Wannier 哈密顿量计算磁化率和谱函数。本次新增 4 个 Fortran 模块：</p>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>功能</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>modules/bayesian.f90</code></td>
+<td>GP Bayesian 优化，拟合 J(R) 和 S 向量</td>
+</tr>
+<tr>
+<td><code>modules/classical_mc.f90</code></td>
+<td>经典 Heisenberg MC，计算热平均磁矩 m(T)</td>
+</tr>
+<tr>
+<td><code>modules/ahc_calc.f90</code></td>
+<td>反常霍尔电导率（Berry 曲率，无数值求导）</td>
+</tr>
+<tr>
+<td><code>src/wanneff_JS.f90</code></td>
+<td>主流程：下折叠→Bayesian 拟合→MC 温度扫描→输出 HR</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="关键设计决策">关键设计决策 </h2>
+<ul>
+<li><strong>构建</strong>：保留现有 Makefile（不用 fpm）</li>
+<li><strong>J-S 耦合</strong>：仅支持 spinor 模式</li>
+<li><strong>S 为 3 维向量</strong> S = (S_x, S_y, S_z)，完整 J·(S·σ/2) 耦合矩阵</li>
+<li><strong>tsf</strong> = NN s-f 跃迁；<strong>tsf2</strong> = on-site s-f（默认 0）</li>
+<li><strong>J_TENSOR=.false.</strong>（默认）：标量 J，Bayesian 参数 (J_0, S_x, S_y, S_z)，4 维</li>
+<li><strong>J_TENSOR=.true.</strong>：J(R) 张量，Bayesian 参数 (J(R_1),...,J(R_n), S_x, S_y, S_z)，(n_jrpt+3) 维</li>
+<li><strong>J_R_range(6)</strong>：(Rx_min,Rx_max,Ry_min,Ry_max,Rz_min,Rz_max)，全零则用 seedbare R-grid</li>
+<li><strong>tol_Jeff</strong>：Bayesian 收敛后对 J(R) 的剪枝阈值（非优化过程中）</li>
+<li><strong>mc_weiss_mean_field=.true.</strong>：自动推导 J_mc = J_eff × S_mag / z</li>
+<li><strong>单测试文件</strong>：<code>kagome_f_spinor_test.py</code></li>
+</ul>
+<hr>
+<h2 id="物理公式">物理公式 </h2>
+<h3 id="下折叠ω0-静态极限">下折叠（ω=0 静态极限） </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>G_full(k, 0) = -H_seed(k)^{-1}              [已移位到 E_F=0]
+G_CC(k)      = G_full(k)[CC 块]
+H_eff_CC(k)  = -G_CC(k)^{-1}
+</code></pre><p>[Ref: Kotliar et al., RMP 78, 865 (2006)]</p>
+<h3 id="j-s-交换耦合kondo-晶格">J-S 交换耦合（Kondo 晶格） </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>S·σ/2 = [[S_z/2,      (S_x-iS_y)/2],
+          [(S_x+iS_y)/2, -S_z/2    ]]
+
+标量模式: H_JS(k) = J_0 · (S·σ/2)
+张量模式: H_JS(k) = (Σ_R J(R) e^{ik·R}) · (S·σ/2)
+</code></pre><p>对每个 CC 轨道 io（spinor：1..n_c 为自旋↑，n_c+1..2n_c 为自旋↓）：</p>
+<pre data-role="codeBlock" data-info="fortran" class="language-fortran fortran"><code>hr<span class="token punctuation">(</span>io<span class="token punctuation">,</span>     io<span class="token punctuation">,</span>     R<span class="token punctuation">)</span> <span class="token operator">+</span><span class="token operator">=</span> J<span class="token punctuation">(</span>R<span class="token punctuation">)</span><span class="token operator">*</span>S_z<span class="token operator">/</span><span class="token number">2</span>
+hr<span class="token punctuation">(</span>io<span class="token operator">+</span>n_c<span class="token punctuation">,</span> io<span class="token operator">+</span>n_c<span class="token punctuation">,</span> R<span class="token punctuation">)</span> <span class="token operator">-</span><span class="token operator">=</span> J<span class="token punctuation">(</span>R<span class="token punctuation">)</span><span class="token operator">*</span>S_z<span class="token operator">/</span><span class="token number">2</span>
+hr<span class="token punctuation">(</span>io<span class="token punctuation">,</span>     io<span class="token operator">+</span>n_c<span class="token punctuation">,</span> R<span class="token punctuation">)</span> <span class="token operator">+</span><span class="token operator">=</span> J<span class="token punctuation">(</span>R<span class="token punctuation">)</span><span class="token operator">*</span><span class="token punctuation">(</span>S_x<span class="token operator">-</span>iS_y<span class="token punctuation">)</span><span class="token operator">/</span><span class="token number">2</span>
+hr<span class="token punctuation">(</span>io<span class="token operator">+</span>n_c<span class="token punctuation">,</span> io<span class="token punctuation">,</span>     R<span class="token punctuation">)</span> <span class="token operator">+</span><span class="token operator">=</span> J<span class="token punctuation">(</span>R<span class="token punctuation">)</span><span class="token operator">*</span><span class="token punctuation">(</span>S_x<span class="token operator">+</span>iS_y<span class="token punctuation">)</span><span class="token operator">/</span><span class="token number">2</span>
+</code></pre><p>[Ref: Coleman, Many-Body Physics (2015); Doniach, Physica B 91 (1977)]</p>
+<h3 id="反常霍尔电导率ahc">反常霍尔电导率（AHC） </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>σ_xy = -(e²/h) · (1/N_k) · Σ_k Σ_n f_n(k) · Ω_n(k)
+Ω_n(k) = -2 Im Σ_{m≠n} &lt;n|v_x|m&gt;&lt;m|v_y|n&gt; / (E_n-E_m)²
+
+速度算符（解析式，无数值求导）：
+v_α(io,jo) = Σ_R [i·2π·R̃_α · e^{i2πk·R}/w(R)] · conj(phase_io)·phase_jo·hr(io,jo,R)
+R̃_α = R_α + τ_{jo,α} - τ_{io,α}
+</code></pre><p>[Ref: Wang et al., PRB 74, 195118 (2006); Yao et al., PRL 92, 037204 (2004)]</p>
+<h3 id="bayesian-优化gp-ei">Bayesian 优化（GP-EI） </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>核函数: k(x,x') = σ_f² · exp(-||x-x'||²/(2l²)) + σ_n²·δ
+预测:   μ(x*) = k(x*,X)·K^{-1}·y,   σ²(x*) = k(x*,x*) - k(x*,X)·K^{-1}·k(X,x*)
+EI:     (y_best-μ)·Φ(z) + σ·φ(z),   z=(y_best-μ)/σ
+高维搜索: 随机采样 N_cand = max(1000, 50*(n_jrpt+3)) 候选点
+</code></pre><p>[Ref: Mockus (1989); Brochu et al. arXiv:1012.2599; Bergstra &amp; Bengio, JMLR 13 (2012)]</p>
+<h3 id="经典-mcmetropolis-heisenberg">经典 MC（Metropolis-Heisenberg） </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>E = -J_mc · Σ_{&lt;ij&gt;} S_i·S_j,   |S_i| = S_mag
+P_accept = min(1, exp(-ΔE/T))
+Weiss MFT: J_mc = J_eff·S_mag/z,   T_c ≈ J_eff·S_mag²/3
+输出: mvec_vs_T(3, n_temps),   S_eff_vec(T) = S_mag · mvec_vs_T(:,iT)
+</code></pre><p>[Ref: Janke, Monte Carlo Simulations of Spin Systems, Springer (1996)]</p>
+<hr>
+<h2 id="新增修改文件">新增/修改文件 </h2>
+<h3 id="修改文件">修改文件 </h3>
+<h4 id="srcinputf90"><code>src/input.f90</code> </h4>
+<p>新增 <code>&amp;EFFJS</code> namelist 变量：</p>
+<pre data-role="codeBlock" data-info="fortran" class="language-fortran fortran"><code><span class="token keyword keyword-character">character</span><span class="token punctuation">(</span>len<span class="token operator">=</span><span class="token number">80</span><span class="token punctuation">)</span> <span class="token operator">::</span> seedbare <span class="token operator">=</span> <span class="token string">''</span>
+<span class="token keyword keyword-logical">logical</span>  <span class="token operator">::</span> eff_js <span class="token operator">=</span> <span class="token boolean">.false.</span><span class="token punctuation">,</span> eff_mc <span class="token operator">=</span> <span class="token boolean">.false.</span>
+<span class="token keyword keyword-real">real</span><span class="token punctuation">(</span>dp<span class="token punctuation">)</span> <span class="token operator">::</span> mc_temperature<span class="token punctuation">(</span><span class="token number">3</span><span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token punctuation">(/</span><span class="token number">0.0</span><span class="token punctuation">,</span> <span class="token number">0.5</span><span class="token punctuation">,</span> <span class="token number">300.0</span><span class="token punctuation">/)</span>  <span class="token comment">! T_start, T_step, T_end (eV)</span>
+<span class="token keyword keyword-logical">logical</span>  <span class="token operator">::</span> mc_weiss_mean_field <span class="token operator">=</span> <span class="token boolean">.true.</span>
+<span class="token keyword keyword-real">real</span><span class="token punctuation">(</span>dp<span class="token punctuation">)</span> <span class="token operator">::</span> J_mc <span class="token operator">=</span> <span class="token number">0.0_dp</span>
+<span class="token keyword keyword-logical">logical</span>  <span class="token operator">::</span> J_TENSOR <span class="token operator">=</span> <span class="token boolean">.false.</span>
+<span class="token keyword keyword-real">real</span><span class="token punctuation">(</span>dp<span class="token punctuation">)</span> <span class="token operator">::</span> tol_Jeff <span class="token operator">=</span> <span class="token number">1.0d-2</span>
+<span class="token keyword keyword-integer">integer</span>  <span class="token operator">::</span> J_R_range<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token punctuation">(/</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">/)</span>  <span class="token comment">! 全零=用 seedbare R-grid</span>
+<span class="token keyword keyword-integer">integer</span>  <span class="token operator">::</span> bayes_niter <span class="token operator">=</span> <span class="token number">50</span>
+<span class="token keyword keyword-real">real</span><span class="token punctuation">(</span>dp<span class="token punctuation">)</span> <span class="token operator">::</span> J_bounds<span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token punctuation">(/</span><span class="token number">0.0_dp</span><span class="token punctuation">,</span> <span class="token number">10.0_dp</span><span class="token punctuation">/)</span>  <span class="token comment">! J≥0 消除符号简并</span>
+<span class="token keyword keyword-real">real</span><span class="token punctuation">(</span>dp<span class="token punctuation">)</span> <span class="token operator">::</span> S_bounds<span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token punctuation">(/</span><span class="token operator">-</span><span class="token number">5.0_dp</span><span class="token punctuation">,</span>  <span class="token number">5.0_dp</span><span class="token punctuation">/)</span> <span class="token comment">! 每个分量范围</span>
+</code></pre><p>新增 <code>read_effjs_input(codename)</code> 子程序（含 MPI 广播）。</p>
+<h4 id="modulesmakefile"><code>modules/Makefile</code> </h4>
+<pre data-role="codeBlock" data-info="makefile" class="language-makefile makefile"><code>NEWMODS <span class="token operator">=</span> bayesian.o classical_mc.o ahc_calc.o
+objects <span class="token operator">=</span> ... <span class="token variable">$</span><span class="token punctuation">(</span>NEWMODS<span class="token punctuation">)</span>
+<span class="token target symbol">bayesian.o</span><span class="token punctuation">:</span>     constants.o linalgwrap.o
+<span class="token target symbol">classical_mc.o</span><span class="token punctuation">:</span> constants.o
+<span class="token target symbol">ahc_calc.o</span><span class="token punctuation">:</span>     constants.o wanndata.o linalgwrap.o
+</code></pre><h4 id="srcmakefile"><code>src/Makefile</code> </h4>
+<pre data-role="codeBlock" data-info="makefile" class="language-makefile makefile"><code><span class="token target symbol">wanneff_js</span><span class="token punctuation">:</span> wanneff_JS.o green.o <span class="token variable">$</span><span class="token punctuation">(</span>MODLIB<span class="token punctuation">)</span>
+    <span class="token variable">$</span><span class="token punctuation">(</span>F90<span class="token punctuation">)</span> ... -o wanneff_js.x wanneff_JS.o green.o <span class="token variable">$</span><span class="token punctuation">(</span>MODLIB<span class="token punctuation">)</span> <span class="token variable">$</span><span class="token punctuation">(</span>MKLLIBS<span class="token punctuation">)</span>
+</code></pre><h3 id="新增文件">新增文件 </h3>
+<h4 id="modulesbayesianf90-446行"><code>modules/bayesian.f90</code> (446行) </h4>
+<p>TYPE gp_model + gp_init/finalize/update/predict + rbf_kernel + expected_improvement + normal_cdf + latin_hypercube + bayesian_optimize</p>
+<h4 id="modulesclassical_mcf90-407行"><code>modules/classical_mc.f90</code> (407行) </h4>
+<p>TYPE mc_lattice + mc_init/finalize + mc_random_spin(Marsaglia) + mc_build_neighbors(PBC) + mc_sweep(Metropolis) + mc_thermalize + mc_measure_magnetization + classical_mc_run</p>
+<h4 id="modulesahc_calcf90-273行"><code>modules/ahc_calc.f90</code> (273行) </h4>
+<p>calc_velocity(解析) + calc_berry_curvature(ZGEMM) + fermi_func + calc_sigma_xy + calc_berry_curvature_kmap</p>
+<h4 id="srcwanneff_jsf90-722行"><code>src/wanneff_JS.f90</code> (722行) </h4>
+<p>MODULE wanneff_js_mod（downfold_to_cc, determine_cc_indices, add_js_coupling, js_objective_callback）+ PROGRAM WannEffJS</p>
+<p><strong>重要架构细节</strong>：</p>
+<ul>
+<li><code>read_posfile</code> 只修改 lattice 模块的全局 <code>ham%tau</code>，因此用全局 <code>ham</code> 作为 seed 系统</li>
+<li>ham_bare 的 tau 在读取 seedbare.pos 后手动从 xat 填充</li>
+<li>Bayesian 回调通过模块级全局变量 <code>g_hk_eff_cc_all</code>, <code>g_ham_bare</code>, <code>g_kvec</code> 传递数据</li>
+</ul>
+<hr>
+<h2 id="输入文件格式wanneffinp">输入文件格式（wanneff.inp） </h2>
+<pre data-role="codeBlock" data-info="fortran" class="language-fortran fortran"><code><span class="token punctuation">&amp;</span>SYSTEM
+  seed<span class="token operator">=</span><span class="token string">'seed'</span><span class="token punctuation">,</span> beta<span class="token operator">=</span><span class="token number">1e7</span><span class="token punctuation">,</span> mu<span class="token operator">=</span><span class="token number">0.0</span>
+/
+<span class="token punctuation">&amp;</span>CONTROL
+  spectra_calc<span class="token operator">=</span><span class="token boolean">.true.</span><span class="token punctuation">,</span> nnu<span class="token operator">=</span><span class="token number">200</span><span class="token punctuation">,</span> emin<span class="token operator">=</span><span class="token operator">-</span><span class="token number">3.0</span><span class="token punctuation">,</span> emax<span class="token operator">=</span><span class="token number">3.0</span><span class="token punctuation">,</span> eps<span class="token operator">=</span><span class="token number">1e-3</span>
+/
+<span class="token punctuation">&amp;</span>EFFJS
+  seedbare<span class="token operator">=</span><span class="token string">'seedbare'</span><span class="token punctuation">,</span>
+  eff_js<span class="token operator">=</span><span class="token boolean">.true.</span><span class="token punctuation">,</span> eff_mc<span class="token operator">=</span><span class="token boolean">.true.</span><span class="token punctuation">,</span>
+  mc_temperature<span class="token operator">=</span><span class="token number">0.0</span><span class="token punctuation">,</span> <span class="token number">0.001</span><span class="token punctuation">,</span> <span class="token number">0.025</span><span class="token punctuation">,</span>    <span class="token comment">! T_start, T_step, T_end (eV)</span>
+  J_TENSOR<span class="token operator">=</span><span class="token boolean">.false.</span><span class="token punctuation">,</span> tol_Jeff<span class="token operator">=</span><span class="token number">1e-2</span><span class="token punctuation">,</span>
+  J_R_range<span class="token operator">=</span><span class="token number">0</span> <span class="token number">0</span> <span class="token number">0</span> <span class="token number">0</span> <span class="token number">0</span> <span class="token number">0</span><span class="token punctuation">,</span>              <span class="token comment">! 0=使用 seedbare R-grid</span>
+  bayes_niter<span class="token operator">=</span><span class="token number">50</span><span class="token punctuation">,</span>
+  J_bounds<span class="token operator">=</span><span class="token number">0.0</span> <span class="token number">5.0</span><span class="token punctuation">,</span> S_bounds<span class="token operator">=</span><span class="token operator">-</span><span class="token number">3.0</span> <span class="token number">3.0</span>
+/
+</code></pre><hr>
+<h2 id="kagome-测试模型">Kagome 测试模型 </h2>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>格子向量: a1=(1,0,0), a2=(0.5,√3/2,0), a3=(0,0,10) [2D]
+
+位点（分数坐标）:
+  1: (0,   0,   0) — s 轨道
+  2: (0.5, 0,   0) — s 轨道
+  3: (0,   0.5, 0) — s 轨道
+  4: (0.5, 0.5, 0) — s+f 轨道
+
+seed norb = 2×(4s+1f) = 10 (spinor)
+seedbare norb = 2×4s = 8 (spinor)
+
+跃迁: tss=-1.0 eV, tsf=-0.15 eV, tsf2=0.0 eV
+R 截止: WS 构建，nr=5×5×1 → nrpt=31
+
+轨道顺序 (seed):  [s1↑,s2↑,s3↑,s4↑,f4↑, s1↓,s2↓,s3↓,s4↓,f4↓]
+轨道顺序 (bare):  [s1↑,s2↑,s3↑,s4↑, s1↓,s2↓,s3↓,s4↓]
+
+能带路径: Γ(0,0,0) → M(0.5,0,0) → K(1/3,1/3,0) → Γ  (100点/段)
+</code></pre><p><strong>HR 构建注意事项（Python）</strong>：</p>
+<ul>
+<li>s-f 跃迁需要分两个循环：前向 <code>d(f_site, s_i+R)</code> 和反向 <code>d(s_i, f_site+R)</code></li>
+<li>均需 <code>d &gt; 1e-8</code> 排除 on-site（同一位点距离为 0）</li>
+<li>on-site f-s 耦合（tsf2）单独在 d&lt;1e-8 时处理</li>
+</ul>
+<hr>
+<h2 id="测试5项python-独立实现">测试（5项，Python 独立实现） </h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>测试</th>
+<th>内容</th>
+<th>通过标准</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Kagome 参考能带+DOS</td>
+<td>Python H(k) Hermitian 验证</td>
+<td>max|H-H†|&lt;1e-10</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Bayesian 8维优化</td>
+<td>已知函数收敛</td>
+<td>f_opt &lt; 0.5 (true_min≈-6)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>经典 MC 方格格子</td>
+<td>⟨|m|⟩(T) 曲线</td>
+<td>m(0)≈1, m(T高)→0</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Berry 曲率可视化</td>
+<td>2D BZ 热图（调试用）</td>
+<td>视觉检查</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Fortran 完整流程</td>
+<td>wanneff_js.x + band对比 + σ_xy(T)</td>
+<td>需编译后运行</td>
+</tr>
+</tbody>
+</table>
+<p><strong>当前状态（Python 测试）：PASS 4/4，SKIP 1（Fortran 未编译）</strong></p>
+<hr>
+<h2 id="编译与运行">编译与运行 </h2>
+<pre data-role="codeBlock" data-info="bash" class="language-bash bash"><code><span class="token comment"># 编译（在 HPC/服务器）</span>
+<span class="token builtin class-name">cd</span> wannchi/modules <span class="token operator">&amp;&amp;</span> <span class="token function">make</span> mod.a
+<span class="token builtin class-name">cd</span> <span class="token punctuation">..</span>/src <span class="token operator">&amp;&amp;</span> <span class="token function">make</span> wanneff_js
+
+<span class="token comment"># Python 测试</span>
+<span class="token builtin class-name">source</span> /Users/ykxu/Projects/hrJS/hrJS/bin/activate
+<span class="token builtin class-name">cd</span> wannchi/tests <span class="token operator">&amp;&amp;</span> python3 kagome_f_spinor_test.py
+
+<span class="token comment"># pip 安装（此机器 SSL 修复）</span>
+pip <span class="token function">install</span> <span class="token operator">&lt;</span>pkg<span class="token operator">&gt;</span> <span class="token parameter variable">--cert</span> /opt/homebrew/etc/openssl@3/cert.pem
+</code></pre><hr>
+<h2 id="现有模块复用检查">现有模块复用检查 </h2>
+<table>
+<thead>
+<tr>
+<th>函数</th>
+<th>来源</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>read_ham</code>, <code>write_ham</code>, <code>calc_hk</code></td>
+<td>wanndata.f90</td>
+<td>wanneff_JS 主流程</td>
+</tr>
+<tr>
+<td><code>heigen</code>, <code>zinvmat</code>, <code>dinvmat</code></td>
+<td>linalgwrap.f90</td>
+<td>下折叠、Berry曲率、GP</td>
+</tr>
+<tr>
+<td><code>read_posfile</code>, <code>read_kmesh</code>, <code>find_ws</code></td>
+<td>lattice.f90</td>
+<td>pos/k-mesh/J_R_range</td>
+</tr>
+<tr>
+<td><code>para_*</code></td>
+<td>para.f90</td>
+<td>MPI 广播/归并</td>
+</tr>
+<tr>
+<td><code>read_input</code> + namelists</td>
+<td>input.f90</td>
+<td>扩展，非重写</td>
+</tr>
+</tbody>
+</table>
+
+      </div>
+      
+      
+    
+    
+    
+    
+    
+    
+  
+    </body></html>

@@ -51,6 +51,26 @@ MODULE input
   namelist /CONTROL/ use_lehman, trace_only, ff_only, fast_calc, eps, nnu, emin, emax, npade
   namelist /SYSTEM/ spectra_calc, seed, beta, mu
   !
+  ! --- wanneff_JS parameters (added for wanneff_JS module) ---
+  character(len=80) :: seedbare = ''
+  logical  :: eff_js = .false.
+  logical  :: eff_mc = .false.
+  real(dp) :: mc_temperature(3) = (/0.0_dp, 0.5_dp, 300.0_dp/) ! T_start, T_step, T_end (eV)
+  logical  :: mc_weiss_mean_field = .true.
+  real(dp) :: J_mc = 0.0_dp
+  logical  :: J_TENSOR = .false.
+  real(dp) :: tol_Jeff = 1.0d-2
+  integer  :: J_R_range(6) = (/0, 0, 0, 0, 0, 0/) ! Rx_min,Rx_max,Ry_min,Ry_max,Rz_min,Rz_max
+                                                    ! All zeros = use same R-grid as seedbare hr
+  integer  :: bayes_niter = 50
+  real(dp) :: J_bounds(2) = (/0.0_dp, 10.0_dp/)   ! J >= 0 breaks sign degeneracy with S
+  real(dp) :: S_bounds(2) = (/-5.0_dp,  5.0_dp/)  ! each S_x, S_y, S_z component
+  !
+  namelist /EFFJS/ seedbare, eff_js, eff_mc, mc_temperature, &
+                   mc_weiss_mean_field, J_mc,                 &
+                   J_TENSOR, tol_Jeff, J_R_range,             &
+                   bayes_niter, J_bounds, S_bounds
+  !
 CONTAINS
   !
  SUBROUTINE read_input(codename)
@@ -323,5 +343,93 @@ CONTAINS
   if (allocated(qvec)) deallocate(qvec)
   !
  END SUBROUTINE
+  !
+  ! --- Added for wanneff_JS: read &EFFJS namelist ---
+ SUBROUTINE read_effjs_input(codename)
+  !
+  ! Read &EFFJS namelist from {codename}.inp (e.g. 'wanneff').
+  ! Also re-reads &SYSTEM and &CONTROL for convenience.
+  ! Call AFTER read_input to overwrite with wanneff-specific values.
+  !
+  use constants, only : fin, dp
+  use para,      only : inode, para_sync_int, para_sync_real, para_sync0
+  !
+  implicit none
+  !
+  character(*), intent(in) :: codename
+  !
+  integer, dimension(12) :: tt_int
+  real(dp), dimension(12) :: tt_real
+  integer :: ii
+  !
+  if (inode .eq. 0) then
+    open(unit=fin, file=trim(codename)//'.inp')
+    read(nml=SYSTEM,  unit=fin)
+    read(nml=CONTROL, unit=fin)
+    read(nml=EFFJS,   unit=fin)
+    close(unit=fin)
+    !
+    tt_int(1)  = merge(1, 0, eff_js)
+    tt_int(2)  = merge(1, 0, eff_mc)
+    tt_int(3)  = merge(1, 0, mc_weiss_mean_field)
+    tt_int(4)  = merge(1, 0, J_TENSOR)
+    tt_int(5)  = bayes_niter
+    tt_int(6:11) = J_R_range(1:6)
+    tt_real(1:3) = mc_temperature(1:3)
+    tt_real(4)   = J_mc
+    tt_real(5)   = tol_Jeff
+    tt_real(6:7) = J_bounds(1:2)
+    tt_real(8:9) = S_bounds(1:2)
+    tt_real(10)  = mu
+    tt_real(11)  = beta
+  endif
+  !
+  call para_sync_int(tt_int,  11)
+  call para_sync_real(tt_real, 11)
+  !
+  eff_js             = (tt_int(1) == 1)
+  eff_mc             = (tt_int(2) == 1)
+  mc_weiss_mean_field= (tt_int(3) == 1)
+  J_TENSOR           = (tt_int(4) == 1)
+  bayes_niter        =  tt_int(5)
+  J_R_range(1:6)     =  tt_int(6:11)
+  mc_temperature(1:3)=  tt_real(1:3)
+  J_mc               =  tt_real(4)
+  tol_Jeff           =  tt_real(5)
+  J_bounds(1:2)      =  tt_real(6:7)
+  S_bounds(1:2)      =  tt_real(8:9)
+  mu                 =  tt_real(10)
+  beta               =  tt_real(11)
+  !
+  ! Sync character seedbare via integer array of ASCII codes
+  call para_sync_character(seedbare)
+  !
+ END SUBROUTINE read_effjs_input
+  !
+  ! --- Helper: broadcast character variable ---
+ SUBROUTINE para_sync_character(str)
+  !
+  use para, only : inode, para_sync_int
+  !
+  implicit none
+  !
+  character(len=80), intent(inout) :: str
+  !
+  integer, dimension(80) :: codes
+  integer :: ii
+  !
+  if (inode .eq. 0) then
+    do ii = 1, 80
+      codes(ii) = ichar(str(ii:ii))
+    enddo
+  endif
+  call para_sync_int(codes, 80)
+  if (inode .ne. 0) then
+    do ii = 1, 80
+      str(ii:ii) = char(codes(ii))
+    enddo
+  endif
+  !
+ END SUBROUTINE para_sync_character
   !
 END MODULE
