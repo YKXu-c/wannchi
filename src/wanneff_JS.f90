@@ -95,6 +95,18 @@ CONTAINS
     ! Strategy: compare site nbasis. Sites in seedbare match sites in seed
     ! with the same orbital count; any extra in seed are FF orbitals.
     !
+    ! ASSUMPTIONS (must hold for correct results):
+    !   1. Site ordering in seed.pos and seedbare.pos must match (site i in seed
+    !      corresponds to site i in seedbare). The walk pairs sites sequentially.
+    !   2. At each shared site, CC orbitals come FIRST (lower Wannier90 band index),
+    !      and extra (FF) orbitals come after (indices > nbasis_bare(i)).
+    !      This depends on the projection block order in the Wannier90 input.
+    !   3. Same nbasis count at a site implies same orbital character.
+    !      Cases where count matches but character differs (e.g., seed has d+f,
+    !      seedbare has d+s) will silently mislabel orbitals.
+    ! If these assumptions may not hold, use the 'cc_orbital_indices' override
+    ! in &EFFJS namelist (future feature) to specify CC indices explicitly.
+    !
     ! For spinor: CC orbitals = first n_c orbital indices for spin-up, then n_c for spin-down.
     ! The FF orbitals are those present in seed but not seedbare (by site/orbital count).
     !
@@ -362,14 +374,19 @@ PROGRAM WannEffJS
                                mu, seed, seedbare, eff_js, eff_mc, &
                                mc_temperature, mc_weiss_mean_field, J_mc, &
                                J_TENSOR, tol_Jeff, J_R_range, bayes_niter, &
-                               J_bounds, S_bounds
+                               J_bounds, S_bounds, mc_supercell, sigma_broadening, &
+                               berry_curvature_output, &
+                               read_qpoints, nqpt, qvec
   use bayesian,        only : bayesian_optimize
   use classical_mc,    only : classical_mc_run
+  use transp_calc,     only : calc_sigma_xy, calc_sigma_xx, calc_berry_curvature_kmap
+  use wannlog,         only : log_init, log_start, log_stop, log_msg, log_print_summary
+  use linalgwrap,      only : eigen
   use wanneff_js_mod
   !
   implicit none
   !
-  TYPE(wannham) :: ham_bare   ! seedbare (conduction only)
+  TYPE(wannham), TARGET :: ham_bare   ! seedbare (conduction only)
   TYPE(wannham) :: ham_out    ! output effective Hamiltonian
   ! Note: global 'ham' from lattice module is used as ham_full (full system with f)
   !
@@ -392,13 +409,20 @@ PROGRAM WannEffJS
   real(dp), allocatable :: mvec_vs_T(:,:)
   integer :: n_temps, iT
   real(dp), dimension(3) :: S_eff_vec
-  real(dp) :: T_now
+  real(dp) :: T_now, sigma_xy, sigma_xx
+  real(dp), allocatable :: omega_kmap_seed(:), omega_kmap_bare(:), omega_kmap_eff(:)
   !
   real(dp), allocatable :: frac_pos_f(:,:)
-  integer :: ik, ii, jj, n_pruned, io_tmp
+  integer :: ik, ii, jj, n_pruned, io_tmp, iq_js
   character(len=120) :: fname_out
+  ! Eigenvalue comparison variables (JS_result.dat)
+  complex(dp), allocatable :: hk_js_seed(:,:), hk_js_eff(:,:)
+  real(dp),    allocatable :: eig_js_seed(:),  eig_js_eff(:)
   CALL init_para('WannEffJS')
   CALL read_effjs_input('wanneff')
+  !
+  if (inode .eq. 0) CALL log_init()
+  if (inode .eq. 0) CALL log_msg('Program WannEffJS started')
   !
   if (inode .eq. 0) then
     write(stdout, *) "========================================"
@@ -501,6 +525,7 @@ PROGRAM WannEffJS
   !
   ! ---- Downfolding loop ----
   ! Use global 'ham' (the full system hamiltonian) for calc_hk
+  if (inode .eq. 0) CALL log_start('downfolding')
   allocate(hk_full(norb_full, norb_full))
   allocate(hk_eff_cc(norb_cc, norb_cc))
   allocate(g_hk_eff_cc(norb_cc, norb_cc, nkirr))
@@ -518,6 +543,7 @@ PROGRAM WannEffJS
   !
   if (inode .eq. 0) then
     write(stdout, *) "  Downfolding done."
+    CALL log_stop('downfolding')
   endif
   !
   ! ---- Set up module-level globals for Bayesian callback ----
@@ -536,6 +562,7 @@ PROGRAM WannEffJS
   !
   ! ---- Bayesian Optimization ----
   if (eff_js .and. inode .eq. 0) then
+    CALL log_start('bayesian_optimize')
     !
     if (.not. J_TENSOR) then
       ! Scalar mode: 4 parameters (J_0, S_x, S_y, S_z)
@@ -585,6 +612,35 @@ PROGRAM WannEffJS
     write(stdout, '(A,3F10.5)') "  Svec_opt= ", Svec_opt
     write(stdout, '(A,1F10.5)') "  |S|_opt = ", S_mag_opt
     !
+    ! ---- Write seed_JS.output ----
+    write(fname_out, '(A,A)') trim(seed), '_JS.output'
+    open(unit=99, file=trim(fname_out), status='replace')
+    write(99, '(A)')        '# wanneff_JS output'
+    write(99, '(A,A)')      '# seed     = ', trim(seed)
+    write(99, '(A,A)')      '# seedbare = ', trim(seedbare)
+    write(99, '(A,L1)')     '# J_TENSOR = ', J_TENSOR
+    write(99, '(A,I6)')     '# bayes_niter = ', bayes_niter
+    write(99, '(A,ES10.4)') '# tol_Jeff    = ', tol_Jeff
+    write(99, '(A)')        ''
+    if (.not. J_TENSOR) then
+      write(99, '(A,F12.6)')  'J_opt  ', J_opt
+    endif
+    write(99, '(A,F12.6)')  'S_x    ', Svec_opt(1)
+    write(99, '(A,F12.6)')  'S_y    ', Svec_opt(2)
+    write(99, '(A,F12.6)')  'S_z    ', Svec_opt(3)
+    write(99, '(A,F12.6)')  'S_mag  ', S_mag_opt
+    if (J_TENSOR .and. n_jrpt > 0) then
+      write(99, '(A,I6)')   'n_jrpt ', n_jrpt
+      write(99, '(A)')      ''
+      write(99, '(A)')      '# R1   R2   R3        J(R)'
+      do ii = 1, n_jrpt
+        write(99, '(3I5,F14.8)') nint(rvec_J(:,ii)), jeff_R(ii)
+      enddo
+    endif
+    close(99)
+    write(stdout, '(A,A)')  '  JS output written: ', trim(fname_out)
+    CALL log_stop('bayesian_optimize')
+    !
   endif
   !
   ! ---- Construct output Hamiltonian at T=0 ----
@@ -624,10 +680,62 @@ PROGRAM WannEffJS
     write(fname_out, '(A,A)') trim(seedbare), '_hr_0K'
     CALL write_ham(ham_out, trim(fname_out))
     !
+    ! Compute AHC at T=0 using existing k-mesh
+    CALL log_start('transport_calc')
+    CALL calc_sigma_xy(sigma_xy, ham_out, kvec(:,1:nkirr), kwt(1:nkirr), nkirr, 0.0_dp, 0.0_dp)
+    CALL calc_sigma_xx(sigma_xx, ham_out, kvec(:,1:nkirr), kwt(1:nkirr), nkirr, 0.0_dp, 0.0_dp, sigma_broadening)
+    write(stdout, '(A,F12.6,A)') "  AHC sigma_xy(0K) = ", sigma_xy, " e^2/h"
+    write(stdout, '(A,F12.6,A)') "  sigma_xx(0K)     = ", sigma_xx, " e^2/h"
+    CALL log_stop('transport_calc')
+    !
+    ! ---- Write seed_JS_result.dat: eigenvalue comparison along band path ----
+    CALL read_qpoints   ! reads QPOINTS file -> nqpt, qvec
+    allocate(hk_js_seed(norb_full, norb_full), eig_js_seed(norb_full))
+    allocate(hk_js_eff(norb_bare,  norb_bare),  eig_js_eff(norb_bare))
+    write(fname_out, '(A,A)') trim(seed), '_JS_result.dat'
+    open(unit=97, file=trim(fname_out), status='replace')
+    write(97, '(A,I5,A,I5)') '# norb_seed=', norb_full, '  norb_eff=', norb_bare
+    write(97, '(A)') '# q_x       q_y       q_z       eig_seed(1..N) eig_eff(1..M)'
+    do iq_js = 1, nqpt
+      call calc_hk(hk_js_seed, ham,     qvec(:, iq_js))
+      call eigen(eig_js_seed, hk_js_seed, norb_full)
+      call calc_hk(hk_js_eff,  ham_out, qvec(:, iq_js))
+      call eigen(eig_js_eff,  hk_js_eff,  norb_bare)
+      write(97, '(3F10.5,100F10.4)') qvec(:, iq_js), eig_js_seed, eig_js_eff
+    enddo
+    close(97)
+    deallocate(hk_js_seed, eig_js_seed, hk_js_eff, eig_js_eff)
+    write(stdout, '(A,A)') '  JS result written: ', trim(fname_out)
+    !
+  endif
+  !
+  ! ---- Optional Berry curvature k-map output ----
+  if (eff_js .and. berry_curvature_output .and. inode .eq. 0) then
+    !
+    allocate(omega_kmap_seed(nkirr), omega_kmap_bare(nkirr), omega_kmap_eff(nkirr))
+    CALL calc_berry_curvature_kmap(omega_kmap_seed, ham,      kvec(:,1:nkirr), kwt(1:nkirr), nkirr, 0.0_dp, 0.0_dp)
+    CALL calc_berry_curvature_kmap(omega_kmap_bare, ham_bare, kvec(:,1:nkirr), kwt(1:nkirr), nkirr, 0.0_dp, 0.0_dp)
+    CALL calc_berry_curvature_kmap(omega_kmap_eff,  ham_out,  kvec(:,1:nkirr), kwt(1:nkirr), nkirr, 0.0_dp, 0.0_dp)
+    !
+    write(fname_out, '(A,A)') trim(seed), '_berry_curvature.dat'
+    open(unit=96, file=trim(fname_out), status='replace')
+    write(96, '(A)') '# k_x       k_y       k_z       Omega_seed  Omega_bare  Omega_eff(0K)'
+    do ik = 1, nkirr
+      write(96, '(3F10.5,3F14.6)') kvec(:,ik), omega_kmap_seed(ik), omega_kmap_bare(ik), omega_kmap_eff(ik)
+    enddo
+    close(96)
+    deallocate(omega_kmap_seed, omega_kmap_bare, omega_kmap_eff)
+    write(stdout, '(A,A)') '  Berry curvature written: ', trim(fname_out)
+    !
   endif
   !
   ! ---- Monte Carlo temperature sweep ----
   if (eff_mc .and. eff_js .and. inode .eq. 0) then
+    !
+    ! Open transport vs temperature output file
+    open(unit=98, file=trim(seed)//'_transport_vs_T.dat', status='replace')
+    write(98, '(A)') '# T(K)  sigma_xy(e^2/h)  sigma_xx(e^2/h)'
+    write(98, '(F10.2,2F14.6)') 0.0_dp, sigma_xy, sigma_xx  ! T=0 entry (computed above)
     !
     ! Get f-site positions: sites in seed but not in seedbare
     nsite_f = nsite_full - nsite_bare
@@ -650,11 +758,12 @@ PROGRAM WannEffJS
     !
     write(stdout, '(A,1F8.3,A,1F8.3,A,1F8.3,A)') "  MC: T from ", &
           mc_temperature(1), " to ", mc_temperature(3), " step ", mc_temperature(2), " eV"
+    CALL log_start('classical_mc')
     !
     CALL classical_mc_run(J_mc_used, S_mag_opt, &
                            frac_pos_f, max(1, nsite_f), avec, &
                            mc_temperature(1), mc_temperature(2), mc_temperature(3), &
-                           mvec_vs_T, n_temps)
+                           mvec_vs_T, n_temps, mc_supercell)
     !
     ! Write output for each temperature
     do iT = 1, n_temps
@@ -684,28 +793,38 @@ PROGRAM WannEffJS
       endif
       !
       ! Write temperature-labeled output (integer K label from eV: T_K = T_eV * 11604)
-      write(fname_out, '(A,A,1I5,A)') trim(seedbare), '_hr_', &
+      write(fname_out, '(A,A,I0,A)') trim(seedbare), '_hr_', &
             nint(T_now * 11604.522_dp), 'K'
       CALL write_ham(ham_out, trim(fname_out))
       !
+      ! Compute transport at this temperature using existing k-mesh
+      CALL calc_sigma_xy(sigma_xy, ham_out, kvec(:,1:nkirr), kwt(1:nkirr), nkirr, 0.0_dp, 0.0_dp)
+      CALL calc_sigma_xx(sigma_xx, ham_out, kvec(:,1:nkirr), kwt(1:nkirr), nkirr, 0.0_dp, 0.0_dp, sigma_broadening)
+      write(98, '(F10.2,2F14.6)') T_now * 11604.522_dp, sigma_xy, sigma_xx
+      !
     enddo
     !
+    close(98)
     deallocate(frac_pos_f, mvec_vs_T)
+    CALL log_stop('classical_mc')
     !
   endif
   !
   ! ---- Cleanup ----
-  if (allocated(cc_idx))       deallocate(cc_idx)
-  if (allocated(hk_full))      deallocate(hk_full)
-  if (allocated(hk_eff_cc))    deallocate(hk_eff_cc)
-  if (allocated(g_hk_eff_cc))  deallocate(g_hk_eff_cc)
-  if (allocated(g_kvec))       deallocate(g_kvec)
-  if (allocated(g_rvec_J))     deallocate(g_rvec_J)
-  if (allocated(rvec_J))       deallocate(rvec_J)
-  if (allocated(wt_J))         deallocate(wt_J)
-  if (allocated(params_opt))   deallocate(params_opt)
-  if (allocated(bounds_bayes)) deallocate(bounds_bayes)
-  if (allocated(jeff_R))       deallocate(jeff_R)
+  if (allocated(cc_idx))            deallocate(cc_idx)
+  if (allocated(hk_full))           deallocate(hk_full)
+  if (allocated(hk_eff_cc))         deallocate(hk_eff_cc)
+  if (allocated(g_hk_eff_cc))       deallocate(g_hk_eff_cc)
+  if (allocated(g_kvec))            deallocate(g_kvec)
+  if (allocated(g_rvec_J))          deallocate(g_rvec_J)
+  if (allocated(rvec_J))            deallocate(rvec_J)
+  if (allocated(wt_J))              deallocate(wt_J)
+  if (allocated(params_opt))        deallocate(params_opt)
+  if (allocated(bounds_bayes))      deallocate(bounds_bayes)
+  if (allocated(jeff_R))            deallocate(jeff_R)
+  if (allocated(omega_kmap_seed))   deallocate(omega_kmap_seed)
+  if (allocated(omega_kmap_bare))   deallocate(omega_kmap_bare)
+  if (allocated(omega_kmap_eff))    deallocate(omega_kmap_eff)
   if (allocated(nbasis_full))  deallocate(nbasis_full)
   if (allocated(nbasis_bare))  deallocate(nbasis_bare)
   !
@@ -715,6 +834,7 @@ PROGRAM WannEffJS
   CALL finalize_lattice_kmesh
   CALL finalize_lattice_structure
   CALL finalize_input
+  if (inode .eq. 0) CALL log_print_summary()
   CALL finalize_para
   !
   if (inode .eq. 0) write(stdout, *) "WannEffJS done."

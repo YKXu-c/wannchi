@@ -263,7 +263,7 @@ CONTAINS
     integer :: ii, n_acc
     !
     do ii = 1, n_therm
-      call mc_sweep_correct(mc, temperature, n_acc)
+      call mc_sweep(mc, temperature, n_acc)
     enddo
     !
   END SUBROUTINE mc_thermalize
@@ -290,7 +290,8 @@ CONTAINS
   !
   ! ---------------------------------------------------------------------------
   SUBROUTINE classical_mc_run(J_mc_in, S_mag_in, frac_pos, n_f_sites, avec, &
-                               T_start, T_step, T_end, mvec_vs_T, n_temps)
+                               T_start, T_step, T_end, mvec_vs_T, n_temps, &
+                               mc_supercell_in)
     !
     ! Main MC driver: temperature sweep from T_start to T_end with step T_step.
     !
@@ -301,6 +302,9 @@ CONTAINS
     !   n_f_sites  : number of f-sites per unit cell
     !   avec       : (3,3) lattice vectors (columns = a1,a2,a3)
     !   T_start, T_step, T_end : temperature range in eV
+    !   mc_supercell_in(3) : (NX, NY, NZ) supercell. 0 = auto-detect from avec:
+    !     if |a_i| > 2 * min(|a_j|, |a_k|), it is assumed vacuum → N_i = 1
+    !     otherwise N_i = 10 (standard thermodynamic limit for 2D/3D).
     !
     ! Output:
     !   mvec_vs_T(3, n_temps) : fractional magnetization vector at each temperature
@@ -315,17 +319,42 @@ CONTAINS
     real(dp), intent(in)  :: T_start, T_step, T_end
     real(dp), allocatable, intent(out) :: mvec_vs_T(:,:)
     integer,  intent(out) :: n_temps
+    integer,  dimension(3), intent(in) :: mc_supercell_in  ! (NX,NY,NZ), 0=auto
     !
-    ! Supercell: 10x10x1 for 2D kagome-like systems
-    integer, parameter :: NX = 10, NY = 10, NZ = 1
+    integer, parameter :: N_DEFAULT = 10  ! default supercell per active direction
     integer, parameter :: N_THERM = 5000, N_MEAS = 10000, MEAS_EVERY = 10
     !
     TYPE(mc_lattice) :: mc
     integer :: n_total_sites, iT, imeas, n_acc, ii
+    integer :: NX, NY, NZ
     real(dp) :: T_now, cutoff
     real(dp), dimension(3) :: mvec_tmp, mvec_acc
-    real(dp) :: dist_nn, u
+    real(dp) :: dist_nn, len_a1, len_a2, len_a3, len_min, u
     real(dp), dimension(3) :: r1_cart, r2_cart
+    !
+    ! Determine supercell dimensions: user override or auto-detect from lattice
+    len_a1 = sqrt(sum(avec(:,1)**2))
+    len_a2 = sqrt(sum(avec(:,2)**2))
+    len_a3 = sqrt(sum(avec(:,3)**2))
+    !
+    if (mc_supercell_in(1) > 0) then
+      NX = mc_supercell_in(1)
+    else
+      len_min = min(len_a2, len_a3)
+      NX = merge(1, N_DEFAULT, len_a1 > 2.0_dp * len_min)
+    endif
+    if (mc_supercell_in(2) > 0) then
+      NY = mc_supercell_in(2)
+    else
+      len_min = min(len_a1, len_a3)
+      NY = merge(1, N_DEFAULT, len_a2 > 2.0_dp * len_min)
+    endif
+    if (mc_supercell_in(3) > 0) then
+      NZ = mc_supercell_in(3)
+    else
+      len_min = min(len_a1, len_a2)
+      NZ = merge(1, N_DEFAULT, len_a3 > 2.0_dp * len_min)
+    endif
     !
     ! Determine number of temperature points
     if (T_step < 1.0d-12) then
@@ -360,6 +389,7 @@ CONTAINS
     write(stdout, '(A,1I8,A,1I3,A,1F8.4,A)') &
           "  # MC: ", n_total_sites, " spins, z=", mc%n_nn(1), &
           ", cutoff=", cutoff, " Ang"
+    write(stdout, '(A,3I4,A)') "  # MC supercell: ", NX, NY, NZ, " (auto or user)"
     !
     do iT = 1, n_temps
       !

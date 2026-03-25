@@ -882,7 +882,7 @@ MODULE lattice
     !
   end subroutine
   !
-  logical function ismatsubara
+  logical function ismatsubara()
     !
     implicit none
     !

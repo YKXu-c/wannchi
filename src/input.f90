@@ -65,11 +65,15 @@ MODULE input
   integer  :: bayes_niter = 50
   real(dp) :: J_bounds(2) = (/0.0_dp, 10.0_dp/)   ! J >= 0 breaks sign degeneracy with S
   real(dp) :: S_bounds(2) = (/-5.0_dp,  5.0_dp/)  ! each S_x, S_y, S_z component
+  integer  :: mc_supercell(3) = (/0, 0, 0/)        ! MC supercell (0 = auto-detect from avec)
+  real(dp) :: sigma_broadening = 0.05_dp           ! Lorentzian broadening for sigma_xx (eV)
+  logical  :: berry_curvature_output = .false.     ! Write Berry curvature k-map for seed/bare/eff
   !
   namelist /EFFJS/ seedbare, eff_js, eff_mc, mc_temperature, &
                    mc_weiss_mean_field, J_mc,                 &
                    J_TENSOR, tol_Jeff, J_R_range,             &
-                   bayes_niter, J_bounds, S_bounds
+                   bayes_niter, J_bounds, S_bounds, mc_supercell, &
+                   sigma_broadening, berry_curvature_output
   !
 CONTAINS
   !

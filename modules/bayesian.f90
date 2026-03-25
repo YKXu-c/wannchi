@@ -295,6 +295,194 @@ CONTAINS
   END SUBROUTINE latin_hypercube
   !
   ! ---------------------------------------------------------------------------
+  FUNCTION upper_confidence_bound(mu, sigma, kappa) RESULT(ucb)
+    !
+    ! Upper Confidence Bound (UCB) acquisition function for MINIMIZATION:
+    !   UCB(x) = -mu(x) + kappa * sigma(x)
+    !   (negated mu because we minimize; kappa controls exploration)
+    !
+    real(dp), intent(in) :: mu, sigma, kappa
+    real(dp) :: ucb
+    !
+    ucb = -mu + kappa * sigma
+    !
+  END FUNCTION upper_confidence_bound
+  !
+  ! ---------------------------------------------------------------------------
+  SUBROUTINE gp_log_marginal_likelihood(lml, gp)
+    !
+    ! Compute log marginal likelihood: log P(y|X,l) = -0.5*y^T*alpha - 0.5*log|K| - n/2*log(2pi)
+    ! Uses existing gp%K_inv and gp%alpha.
+    !
+    use constants, only : twopi
+    !
+    TYPE(gp_model), intent(in) :: gp
+    real(dp), intent(out) :: lml
+    !
+    integer :: ii
+    real(dp) :: log_det_K, data_fit
+    !
+    if (gp%n_train < 2) then
+      lml = -1.0d30
+      return
+    endif
+    !
+    ! Data fit: -0.5 * y^T * alpha
+    data_fit = -0.5_dp * dot_product(gp%y_train(1:gp%n_train), gp%alpha(1:gp%n_train))
+    !
+    ! log|K| ≈ -log|K^{-1}|. Approximate via diagonal sum for rank check:
+    ! Full log-det is expensive; use trace approximation for length-scale search:
+    !   log|K^{-1}| ≈ Σ log(K_inv_ii)  [not exact, but monotone for 1D l search]
+    log_det_K = 0.0_dp
+    do ii = 1, gp%n_train
+      if (gp%K_inv(ii,ii) > 1.0d-14) then
+        log_det_K = log_det_K - log(gp%K_inv(ii,ii))  ! log|K| = -log|K^{-1}|
+      endif
+    enddo
+    !
+    lml = data_fit - 0.5_dp * log_det_K &
+          - 0.5_dp * real(gp%n_train, dp) * log(twopi)
+    !
+  END SUBROUTINE gp_log_marginal_likelihood
+  !
+  ! ---------------------------------------------------------------------------
+  SUBROUTINE gp_optimize_ls(gp, bounds, n_params)
+    !
+    ! Optimize GP length scale via golden-section search on marginal likelihood.
+    ! Searches ls in [0.1*ls_init, 5.0*ls_init]. Updates gp%length_scale in place.
+    !
+    TYPE(gp_model), intent(inout) :: gp
+    integer, intent(in) :: n_params
+    real(dp), dimension(2, n_params), intent(in) :: bounds
+    !
+    integer :: ii
+    real(dp) :: ls_lo, ls_hi, ls_mid1, ls_mid2, lml1, lml2
+    real(dp) :: ls_saved, avg_range
+    integer, parameter :: N_GS = 15  ! golden-section iterations
+    real(dp), parameter :: phi = 0.618033988749895_dp  ! golden ratio
+    !
+    avg_range = 0.0_dp
+    do ii = 1, n_params
+      avg_range = avg_range + (bounds(2,ii) - bounds(1,ii))
+    enddo
+    avg_range = avg_range / real(n_params, dp)
+    !
+    ls_lo = avg_range * 0.05_dp   ! minimum search range
+    ls_hi = avg_range * 2.0_dp    ! maximum search range
+    if (ls_lo < 1.0d-6) ls_lo = 1.0d-6
+    !
+    ! Golden section search: maximize marginal likelihood over ls
+    do ii = 1, N_GS
+      ls_mid1 = ls_hi - phi * (ls_hi - ls_lo)
+      ls_mid2 = ls_lo + phi * (ls_hi - ls_lo)
+      !
+      ls_saved = gp%length_scale
+      gp%length_scale = ls_mid1
+      call rebuild_K_inv(gp)
+      call gp_log_marginal_likelihood(lml1, gp)
+      !
+      gp%length_scale = ls_mid2
+      call rebuild_K_inv(gp)
+      call gp_log_marginal_likelihood(lml2, gp)
+      !
+      if (lml1 > lml2) then
+        ls_hi = ls_mid2
+      else
+        ls_lo = ls_mid1
+      endif
+    enddo
+    !
+    ! Set optimal length scale
+    gp%length_scale = 0.5_dp * (ls_lo + ls_hi)
+    call rebuild_K_inv(gp)
+    !
+  END SUBROUTINE gp_optimize_ls
+  !
+  ! ---------------------------------------------------------------------------
+  SUBROUTINE rebuild_K_inv(gp)
+    !
+    ! Rebuild K_inv and alpha from current x_train, y_train, length_scale.
+    !
+    TYPE(gp_model), intent(inout) :: gp
+    !
+    integer :: ii, jj, n
+    real(dp), allocatable :: Kmat(:,:)
+    !
+    n = gp%n_train
+    if (n == 0) return
+    !
+    allocate(Kmat(n, n))
+    do ii = 1, n
+      do jj = 1, n
+        Kmat(ii,jj) = rbf_kernel(gp%x_train(:,ii), gp%x_train(:,jj), &
+                                  gp%n_params, gp%length_scale, gp%signal_var)
+      enddo
+      Kmat(ii,ii) = Kmat(ii,ii) + gp%noise_var
+    enddo
+    !
+    if (allocated(gp%K_inv)) deallocate(gp%K_inv)
+    if (allocated(gp%alpha)) deallocate(gp%alpha)
+    allocate(gp%K_inv(n,n), gp%alpha(n))
+    gp%K_inv = Kmat
+    call invmat(gp%K_inv, n)
+    gp%alpha = matmul(gp%K_inv, gp%y_train(1:n))
+    deallocate(Kmat)
+    !
+  END SUBROUTINE rebuild_K_inv
+  !
+  ! ---------------------------------------------------------------------------
+  SUBROUTINE refine_ei(x_out, x0, gp, y_best, n_params, bounds, n_steps)
+    !
+    ! Local gradient ascent on EI starting from x0.
+    ! Uses finite-difference gradients; clips to bounds.
+    ! n_steps: number of gradient steps (typical: 20)
+    !
+    TYPE(gp_model), intent(in) :: gp
+    integer, intent(in) :: n_params, n_steps
+    real(dp), dimension(n_params), intent(in) :: x0
+    real(dp), dimension(2, n_params), intent(in) :: bounds
+    real(dp), intent(in) :: y_best
+    real(dp), dimension(n_params), intent(out) :: x_out
+    !
+    integer :: step, ip
+    real(dp) :: mu_p, mu_m, sig_p, sig_m, ei_p, ei_m, grad, h, step_size
+    real(dp), dimension(n_params) :: x_cur, x_p, x_m, gradient
+    real(dp) :: avg_range
+    !
+    x_cur = x0
+    avg_range = 0.0_dp
+    do ip = 1, n_params
+      avg_range = avg_range + (bounds(2,ip) - bounds(1,ip))
+    enddo
+    avg_range = avg_range / real(n_params, dp)
+    step_size = avg_range * 0.02_dp   ! 2% of avg range per step
+    !
+    do step = 1, n_steps
+      ! Compute finite-difference gradient of EI
+      do ip = 1, n_params
+        h = max(1.0d-4 * (bounds(2,ip) - bounds(1,ip)), 1.0d-8)
+        x_p = x_cur; x_m = x_cur
+        x_p(ip) = min(x_cur(ip) + h, bounds(2,ip))
+        x_m(ip) = max(x_cur(ip) - h, bounds(1,ip))
+        call gp_predict(gp, x_p, mu_p, sig_p)
+        call gp_predict(gp, x_m, mu_m, sig_m)
+        ei_p = expected_improvement(mu_p, sig_p, y_best)
+        ei_m = expected_improvement(mu_m, sig_m, y_best)
+        gradient(ip) = (ei_p - ei_m) / (x_p(ip) - x_m(ip) + 1.0d-14)
+      enddo
+      ! Gradient ascent step, clip to bounds
+      do ip = 1, n_params
+        x_cur(ip) = x_cur(ip) + step_size * gradient(ip)
+        x_cur(ip) = max(bounds(1,ip), min(bounds(2,ip), x_cur(ip)))
+      enddo
+    enddo
+    !
+    x_out = x_cur
+    !
+  END SUBROUTINE refine_ei
+  !
+  !
+  ! ---------------------------------------------------------------------------
   SUBROUTINE swap_int(a, b)
     integer, intent(inout) :: a, b
     integer :: tmp
@@ -304,24 +492,7 @@ CONTAINS
   ! ---------------------------------------------------------------------------
   SUBROUTINE bayesian_optimize(objective_func, bounds, n_params, result, n_iter)
     !
-    ! Main Bayesian Optimization loop.
-    !
-    ! Inputs:
-    !   objective_func : callback f(params, n) -> real, function to minimize
-    !   bounds         : (2, n_params) array of lower/upper bounds per parameter
-    !   n_params       : dimension of parameter space
-    !   n_iter         : number of Bayesian iterations after initialization
-    ! Output:
-    !   result         : (n_params) best parameters found
-    !
-    ! Algorithm:
-    !   1. n_init = max(5, n_params) Latin Hypercube initial samples
-    !   2. For iter = 1..n_iter:
-    !      a. Predict GP over N_cand = max(1000, 50*n_params) random candidates
-    !      b. Select x_next = argmax EI
-    !      c. Evaluate objective_func(x_next)
-    !      d. Update GP with new observation
-    !   3. Return x with minimum observed f(x)
+    ! Main Bayesian Optimization loop (improved with multi-start EI + GP LS opt).
     !
     use constants, only : stdout
     !
@@ -339,19 +510,21 @@ CONTAINS
     real(dp), dimension(n_params),    intent(out) :: result
     !
     TYPE(gp_model) :: gp
-    integer :: n_init, n_cand, ii, jj, best_idx
+    integer :: n_init, n_cand, ii, jj, ip, best_idx, kr
     real(dp) :: y_val, y_best, ei_val, ei_best
     real(dp) :: mu_pred, sigma_pred
-    real(dp), allocatable :: x_init(:,:)  ! (n_params, n_init)
-    real(dp), allocatable :: x_cand(:,:)  ! (n_params, n_cand)
-    real(dp), allocatable :: x_next(:)    ! (n_params)
-    real(dp), allocatable :: y_all(:)     ! all observed values
-    real(dp), allocatable :: x_all(:,:)   ! all observed x
-    real(dp) :: u
+    real(dp), allocatable :: x_init(:,:)
+    real(dp), allocatable :: x_cand(:,:)
+    real(dp), allocatable :: x_next(:), x_refined(:)
+    real(dp), allocatable :: x_all(:,:)
+    real(dp), allocatable :: y_all(:)
+    real(dp), allocatable :: ei_cand(:)    ! EI at each candidate
+    integer,  allocatable :: top_idx(:)   ! indices of top-K candidates
+    real(dp) :: u, ls_init
+    integer, parameter :: K_REFINE = 5    ! top-K candidates to refine
+    integer, parameter :: N_REFINE = 20   ! gradient steps per refinement
     !
-    ! Hyperparameters: length_scale scaled to average bound range,
-    ! signal_var=1, noise_var=1e-6 (small jitter for stability)
-    real(dp) :: ls_init
+    ! Hyperparameters
     ls_init = 0.0_dp
     do ii = 1, n_params
       ls_init = ls_init + (bounds(2,ii) - bounds(1,ii))
@@ -362,17 +535,20 @@ CONTAINS
     call gp_init(gp, n_params, ls_init, 1.0_dp, 1.0d-6)
     !
     n_init = max(5, n_params)
-    n_cand = max(1000, 50*n_params)
+    n_cand = max(500, 20*n_params)   ! reduced from 50*n for efficiency
     !
     allocate(x_init(n_params, n_init))
-    allocate(x_next(n_params))
+    allocate(x_next(n_params), x_refined(n_params))
     allocate(x_all(n_params, n_init + n_iter))
     allocate(y_all(n_init + n_iter))
+    allocate(x_cand(n_params, n_cand))
+    allocate(ei_cand(n_cand))
+    allocate(top_idx(K_REFINE))
     !
     ! --- Phase 1: Latin Hypercube initialization ---
     call latin_hypercube(x_init, n_init, n_params, bounds)
     !
-    y_best  = 1.0d30
+    y_best   = 1.0d30
     best_idx = 1
     !
     do ii = 1, n_init
@@ -389,33 +565,55 @@ CONTAINS
       endif
     enddo
     !
-    ! --- Phase 2: Bayesian optimization loop ---
-    allocate(x_cand(n_params, n_cand))
+    ! Optimize GP length scale after initialization
+    call gp_optimize_ls(gp, bounds, n_params)
     !
+    ! --- Phase 2: Bayesian optimization loop (multi-start EI refinement) ---
     do ii = 1, n_iter
       !
-      ! Sample N_cand random candidates uniformly within bounds
+      ! Sample N_cand random candidates
       do jj = 1, n_cand
-        do ii = 1, n_params
+        do ip = 1, n_params
           call random_number(u)
-          x_cand(ii, jj) = bounds(1, ii) + &
-                            (bounds(2, ii) - bounds(1, ii)) * u
+          x_cand(ip, jj) = bounds(1, ip) + (bounds(2, ip) - bounds(1, ip)) * u
         enddo
       enddo
       !
-      ! Find x_next = argmax EI over candidates
-      ei_best  = -1.0_dp
-      x_next   = x_cand(:, 1)
+      ! Evaluate EI at all candidates, find top-K
+      ei_best = -1.0_dp
+      x_next  = x_cand(:, 1)
       do jj = 1, n_cand
         call gp_predict(gp, x_cand(:,jj), mu_pred, sigma_pred)
-        ei_val = expected_improvement(mu_pred, sigma_pred, y_best)
-        if (ei_val > ei_best) then
-          ei_best = ei_val
+        ei_cand(jj) = expected_improvement(mu_pred, sigma_pred, y_best)
+        if (ei_cand(jj) > ei_best) then
+          ei_best = ei_cand(jj)
           x_next  = x_cand(:, jj)
         endif
       enddo
       !
-      ! Evaluate objective at x_next
+      ! Select top-K candidates for local refinement.
+      ! Strategy: keep best random candidate + pick K-1 evenly spaced others.
+      top_idx(1) = 1
+      do kr = 1, n_cand
+        if (ei_cand(kr) > ei_cand(top_idx(1))) top_idx(1) = kr
+      enddo
+      do kr = 2, K_REFINE
+        top_idx(kr) = 1 + (kr-1) * (n_cand / K_REFINE)
+        if (top_idx(kr) > n_cand) top_idx(kr) = n_cand
+      enddo
+      !
+      ! Refine top-K candidates with gradient ascent on EI
+      do kr = 1, K_REFINE
+        call refine_ei(x_refined, x_cand(:, top_idx(kr)), gp, y_best, n_params, bounds, N_REFINE)
+        call gp_predict(gp, x_refined, mu_pred, sigma_pred)
+        ei_val = expected_improvement(mu_pred, sigma_pred, y_best)
+        if (ei_val > ei_best) then
+          ei_best = ei_val
+          x_next  = x_refined
+        endif
+      enddo
+      !
+      ! Evaluate objective at best candidate
       y_val = objective_func(x_next, n_params)
       call gp_update(gp, x_next, y_val)
       x_all(:, n_init+ii) = x_next
@@ -438,7 +636,7 @@ CONTAINS
     !
     write(stdout, '(A,1G14.6)') "  # Bayesian optimization done. f_best = ", y_best
     !
-    deallocate(x_init, x_cand, x_next, x_all, y_all)
+    deallocate(x_init, x_cand, x_next, x_refined, x_all, y_all, ei_cand, top_idx)
     call gp_finalize(gp)
     !
   END SUBROUTINE bayesian_optimize
