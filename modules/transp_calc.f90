@@ -276,20 +276,20 @@ CONTAINS
   ! ---------------------------------------------------------------------------
   SUBROUTINE calc_sigma_xx(sigma_xx, ham, kvec_all, kwt_all, nk, mu_chem, temperature, broadening)
     !
-    ! Full DC longitudinal conductivity (Kubo-Greenwood) with Lorentzian broadening.
+    ! Longitudinal DC conductivity via Green's function Kubo bubble.
     !
-    ! sigma_xx = (2/N_k) Σ_k [ Σ_{n≠m} |<n|v_x|m>|^2 [f_n-f_m]/dE × L(dE,η)   (interband)
-    !                          + Σ_n  |<n|v_x|n>|^2 × L_δ(E_n-μ, η)             (intraband/Drude) ]
+    ! sigma_xx = (1/N_k) Σ_k Tr[ v_x · G(k, μ+iη) · v_x · G(k, μ+iη) ]
     !
-    ! Interband: L(x,η) = η/(π(x²+η²))
-    ! Intraband: L_δ(x,η) = η/(π(x²+η²)) approximates -∂f/∂E = δ(E_n-μ) at T=0
-    !   (n=m limit: lim_{dE→0} [f(E)-f(E+dE)]/dE × L(dE,η) = -df/dE × 1/(π·η))
+    ! where G(k, μ+iη) = (μ+iη - H(k))^{-1}  (retarded Green's function at E_F)
     !
-    ! Velocity v_x = Σ_R [i·2π·Rtilde_x · exp(ik·R)/w(R)] · hr  (exact Wannier sum)
-    ! broadening = η in eV.
+    ! This is the exact single-particle Kubo formula for DC conductivity,
+    ! naturally including both intra- and inter-band contributions via the
+    ! full Green's function. No separation into Drude + interband needed.
+    !
+    ! broadening = η in eV. Physically η = ℏ/(2τ) where τ is the scattering time.
     !
     ! [Ref: Kubo, J. Phys. Soc. Jpn. 12, 570 (1957)]
-    ! [Ref: Greenwood, Proc. Phys. Soc. 71, 585 (1958)]
+    ! [Ref: Bastin et al., J. Phys. Chem. Solids 32, 1811 (1971)]
     !
     TYPE(wannham), intent(in) :: ham
     integer, intent(in)  :: nk
@@ -298,70 +298,51 @@ CONTAINS
     real(dp), intent(in)  :: mu_chem, temperature, broadening
     real(dp), intent(out) :: sigma_xx
     !
-    integer :: ik, norb, n, m
-    complex(dp), allocatable :: hk(:,:), vx(:,:)
-    complex(dp), allocatable :: vx_band(:,:), tmp(:,:)
-    real(dp),    allocatable :: eig(:), f_occ(:)
-    real(dp) :: sigma_acc, dE, lorentz, vx2, vnn2, drude_peak
-    real(dp) :: pi_val
+    integer :: ik, norb, ii
+    complex(dp), allocatable :: hk(:,:), vx(:,:), gf(:,:), tmp1(:,:), tmp2(:,:)
+    complex(dp) :: sigma_acc, w_cmplx
     complex(dp), parameter :: zone  = cmplx(1.0_dp, 0.0_dp, KIND=dp)
     complex(dp), parameter :: zzero = cmplx(0.0_dp, 0.0_dp, KIND=dp)
     !
-    pi_val = twopi / 2.0_dp
+    external :: calc_g0
+    !
     norb = ham%norb
     allocate(hk(norb, norb), vx(norb, norb))
-    allocate(vx_band(norb, norb), tmp(norb, norb))
-    allocate(eig(norb), f_occ(norb))
+    allocate(gf(norb, norb), tmp1(norb, norb), tmp2(norb, norb))
     !
-    sigma_acc = 0.0_dp
+    ! Retarded Green's function evaluated at E_F + i*eta
+    w_cmplx = cmplx(mu_chem, broadening, KIND=dp)
+    !
+    sigma_acc = cmplx_0
     !
     do ik = 1, nk
       !
       call calc_hk(hk, ham, kvec_all(:, ik))
-      call eigen(eig, hk, norb)  ! hk -> eigvec, eig -> eigenvalues
       !
-      call calc_velocity(vx, ham, kvec_all(:, ik), 1)  ! v_x
+      ! G(k, μ+iη) = (μ+iη - H(k))^{-1}
+      call calc_g0(gf, hk, w_cmplx, norb, .false.)
       !
-      ! Transform vx to eigenbasis: vx_band = eigvec^H . vx . eigvec
-      call zgemm('N', 'N', norb, norb, norb, zone, vx, norb, hk, norb, zzero, tmp, norb)
-      call zgemm('C', 'N', norb, norb, norb, zone, hk, norb, tmp, norb, zzero, vx_band, norb)
+      ! v_x(k) — analytic from HR
+      call calc_velocity(vx, ham, kvec_all(:, ik), 1)
       !
-      call fermi_func(f_occ, eig, mu_chem, temperature, norb)
+      ! Kubo bubble: Tr[ v_x · G · v_x · G ]
+      ! tmp1 = v_x · G
+      call zgemm('N', 'N', norb, norb, norb, zone, vx, norb, gf, norb, zzero, tmp1, norb)
+      ! tmp2 = tmp1 · v_x = v_x · G · v_x
+      call zgemm('N', 'N', norb, norb, norb, zone, tmp1, norb, vx, norb, zzero, tmp2, norb)
+      ! product = tmp2 · G = v_x · G · v_x · G
+      call zgemm('N', 'N', norb, norb, norb, zone, tmp2, norb, gf, norb, zzero, tmp1, norb)
       !
-      do n = 1, norb
-        do m = 1, norb
-          if (m == n) cycle
-          dE = eig(n) - eig(m)
-          if (abs(dE) < eps6) cycle
-          !
-          ! |<n|v_x|m>|^2
-          vx2 = real(vx_band(n, m) * conjg(vx_band(n, m)), dp)
-          !
-          ! Lorentzian: L(dE, eta) = eta / (pi * (dE^2 + eta^2))
-          lorentz = broadening / (pi_val * (dE*dE + broadening*broadening))
-          !
-          ! Kubo-Greenwood: [f_n - f_m] / dE * |v_nm|^2 * L(dE,eta)
-          sigma_acc = sigma_acc + vx2 * (f_occ(n) - f_occ(m)) / dE &
-                      * lorentz * kwt_all(ik)
-          !
-        enddo
-      enddo
-      !
-      ! Intraband (Drude) contribution: n=m limit of Kubo-Greenwood formula.
-      ! lim_{dE→0} [f(E)-f(E+dE)]/dE × L(dE,η) = -df/dE × 1/(π·η)
-      ! At T=0: -df/dE ≈ η/(π((E_n-μ)²+η²))  [Lorentzian approx to δ-function]
-      do n = 1, norb
-        vnn2 = real(vx_band(n,n) * conjg(vx_band(n,n)), dp)
-        drude_peak = broadening / (pi_val * ((eig(n) - mu_chem)**2 + broadening**2))
-        sigma_acc = sigma_acc + vnn2 * drude_peak * kwt_all(ik)
-      enddo
+      ! Accumulate Tr(product) × w_k
+      sigma_acc = sigma_acc + sum([(tmp1(ii, ii), ii=1,norb)]) * kwt_all(ik)
       !
     enddo
     !
-    ! Same normalization convention as calc_sigma_xy
-    sigma_xx = 2.0_dp * sigma_acc / (twopi * twopi)
+    ! Extract imaginary part: σ_xx = -Im(bubble) / (2π)²
+    ! The imaginary part of the retarded bubble gives the dissipative conductivity.
+    sigma_xx = -aimag(sigma_acc) / (twopi * twopi)
     !
-    deallocate(hk, vx, vx_band, tmp, eig, f_occ)
+    deallocate(hk, vx, gf, tmp1, tmp2)
     !
   END SUBROUTINE calc_sigma_xx
   !

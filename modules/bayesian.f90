@@ -627,6 +627,9 @@ CONTAINS
       if (mod(ii, 10) == 0 .or. ii == n_iter) then
         write(stdout, '(A,1I4,A,1G14.6,A,1G14.6)') "  # Bayes iter ", ii, &
               "  EI=", ei_best, "  f_best=", y_best
+      else
+        write(stdout, '(A,1I4,A,1G14.6,A,1G14.6)') "  # Bayes iter ", ii, &
+              "  L2=", y_val, "  best=", y_best
       endif
       !
     enddo

@@ -68,12 +68,18 @@ MODULE input
   integer  :: mc_supercell(3) = (/0, 0, 0/)        ! MC supercell (0 = auto-detect from avec)
   real(dp) :: sigma_broadening = 0.05_dp           ! Lorentzian broadening for sigma_xx (eV)
   logical  :: berry_curvature_output = .false.     ! Write Berry curvature k-map for seed/bare/eff
+  ! Optional explicit FF orbital indices (for wanneff_JS - CC = all other seed indices)
+  ! Fixed size array - use n_ff_orbital_indices to know how many are actually used
+  integer, parameter :: max_ff_indices = 100
+  integer :: n_ff_orbital_indices = 0  ! count of actual FF indices
+  integer, dimension(max_ff_indices) :: ff_orbital_indices = 0
   !
   namelist /EFFJS/ seedbare, eff_js, eff_mc, mc_temperature, &
                    mc_weiss_mean_field, J_mc,                 &
                    J_TENSOR, tol_Jeff, J_R_range,             &
                    bayes_niter, J_bounds, S_bounds, mc_supercell, &
-                   sigma_broadening, berry_curvature_output
+                   sigma_broadening, berry_curvature_output, &
+                   n_ff_orbital_indices, ff_orbital_indices
   !
 CONTAINS
   !
@@ -363,7 +369,7 @@ CONTAINS
   character(*), intent(in) :: codename
   !
   integer, dimension(12) :: tt_int
-  real(dp), dimension(12) :: tt_real
+  real(dp), dimension(13) :: tt_real
   integer :: ii
   !
   if (inode .eq. 0) then
@@ -379,6 +385,7 @@ CONTAINS
     tt_int(4)  = merge(1, 0, J_TENSOR)
     tt_int(5)  = bayes_niter
     tt_int(6:11) = J_R_range(1:6)
+    tt_int(12) = nnu
     tt_real(1:3) = mc_temperature(1:3)
     tt_real(4)   = J_mc
     tt_real(5)   = tol_Jeff
@@ -386,10 +393,12 @@ CONTAINS
     tt_real(8:9) = S_bounds(1:2)
     tt_real(10)  = mu
     tt_real(11)  = beta
+    tt_real(12)  = emin
+    tt_real(13)  = emax
   endif
   !
-  call para_sync_int(tt_int,  11)
-  call para_sync_real(tt_real, 11)
+  call para_sync_int(tt_int,  12)
+  call para_sync_real(tt_real, 13)
   !
   eff_js             = (tt_int(1) == 1)
   eff_mc             = (tt_int(2) == 1)
@@ -397,6 +406,7 @@ CONTAINS
   J_TENSOR           = (tt_int(4) == 1)
   bayes_niter        =  tt_int(5)
   J_R_range(1:6)     =  tt_int(6:11)
+  nnu                =  tt_int(12)
   mc_temperature(1:3)=  tt_real(1:3)
   J_mc               =  tt_real(4)
   tol_Jeff           =  tt_real(5)
@@ -404,6 +414,8 @@ CONTAINS
   S_bounds(1:2)      =  tt_real(8:9)
   mu                 =  tt_real(10)
   beta               =  tt_real(11)
+  emin               =  tt_real(12)
+  emax               =  tt_real(13)
   !
   ! Sync character seedbare via integer array of ASCII codes
   call para_sync_character(seedbare)

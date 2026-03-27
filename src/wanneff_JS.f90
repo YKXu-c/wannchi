@@ -19,7 +19,8 @@
 !   Objective (eigenvalue L2 norm):
 !     L(J,S) = (1/N_k) sum_k ||sort(eig(H_bare(k)+H_JS(k))) - sort(eig(H_eff_CC(k)))||^2
 !
-!   Scalar mode (J_TENSOR=.false.): Bayesian optimize (J_0, S_x, S_y, S_z) -- 4 params
+!   Scalar mode (J_TENSOR=.false.): Bayesian optimize (J_0, u_x, u_y, u_z) -- 4 params
+!                                    with S = u / |u| in the objective
 !   Tensor mode (J_TENSOR=.true.):  Bayesian optimize (J(R_1),...,J(R_n), S_x, S_y, S_z)
 !                                    -- (n_jrpt+3) params
 !   After Bayesian: apply tol_Jeff (prune small J(R) to 0).
@@ -35,7 +36,7 @@
 
 MODULE wanneff_js_mod
   !
-  use constants,  only : dp, cmplx_0, cmplx_i, stdout, fin, eps6
+  use constants,  only : dp, cmplx_0, cmplx_1, cmplx_i, stdout, fin, eps6, twopi
   use wanndata,   only : wannham, calc_hk, finalize_wann
   use linalgwrap,  only : invmat, eigen
   !
@@ -52,119 +53,243 @@ MODULE wanneff_js_mod
 CONTAINS
   !
   ! ---------------------------------------------------------------------------
-  SUBROUTINE downfold_to_cc(hk_cc, hk_full, norb_full, norb_cc, cc_idx)
+  SUBROUTINE downfold_rspace(ham_eff_cc, ham_full, cc_idx, ff_idx, n_cc, n_ff)
     !
-    ! Static downfolding: extract effective CC Hamiltonian from full H(k) at omega=0.
+    ! R-space Schur complement downfolding: compute effective CC Hamiltonian.
     !
-    ! G_full(k,0) = -H_full(k)^{-1}      [omega=0, H already shifted to E_F=0]
-    ! G_CC = G_full[CC block]
-    ! H_eff_CC = -G_CC^{-1}
+    ! Formula (Schur complement of block matrix):
+    !   H_eff_CC(R) = H_CC(R) - H_CF(R) * H_FF(R)^{-1} * H_FC(R)
     !
-    integer, intent(in) :: norb_full, norb_cc
-    integer, dimension(norb_cc), intent(in) :: cc_idx
-    complex(dp), dimension(norb_full, norb_full), intent(in) :: hk_full
-    complex(dp), dimension(norb_cc, norb_cc), intent(out) :: hk_cc
+    ! This is equivalent to exactly integrating out the FF orbitals from the
+    ! full Hamiltonian. Unlike the k-space approach (downfold_to_cc) which
+    ! computes H_eff = -[G_CC]^{-1} and can produce ghost states, the Schur
+    ! complement directly gives the CC block of (H_full)^{-1}.
     !
-    complex(dp), dimension(norb_full, norb_full) :: Gfull
-    complex(dp), dimension(norb_cc, norb_cc) :: Gcc
-    integer :: ii, jj
+    ! Ref: Block matrix inversion / Schur complement - standard linear algebra.
+    ! For block matrix M = [A B; C D], Schur complement of D is S = A - B*D^{-1}*C.
     !
-    ! G = -H^{-1}
-    Gfull = -hk_full
-    call invmat(Gfull, norb_full)
+    use constants, only : stdout
+    TYPE(wannham), intent(inout) :: ham_eff_cc
+    TYPE(wannham), intent(in) :: ham_full
+    integer, dimension(n_cc), intent(in) :: cc_idx
+    integer, dimension(n_ff), intent(in) :: ff_idx
+    integer, intent(in) :: n_cc, n_ff
     !
-    ! Extract CC block
-    do ii = 1, norb_cc
-      do jj = 1, norb_cc
-        Gcc(ii, jj) = Gfull(cc_idx(ii), cc_idx(jj))
-      enddo
-    enddo
+    complex(dp), dimension(n_cc, n_cc) :: H_cc
+    complex(dp), dimension(n_cc, n_ff) :: H_cf
+    complex(dp), dimension(n_ff, n_cc) :: H_fc
+    complex(dp), dimension(n_ff, n_ff) :: H_ff, H_ff_inv
+    complex(dp), dimension(n_cc, n_ff) :: tmp
+    integer :: ir, ii, jj
     !
-    ! H_eff_CC = -G_CC^{-1}
-    hk_cc = -Gcc
-    call invmat(hk_cc, norb_cc)
-    hk_cc = -hk_cc
+    write(stdout, '(A,I5,A,I5,A,I5)') 'DEBUG: n_cc=', n_cc, ' n_ff=', n_ff, ' nrpt=', ham_full%nrpt
     !
-  END SUBROUTINE downfold_to_cc
+    ! Copy structure from ham_full to ham_eff_cc
+    ham_eff_cc%norb = n_cc
+    ham_eff_cc%nrpt = ham_full%nrpt
+    ham_eff_cc%rvec = ham_full%rvec
+    ham_eff_cc%weight = ham_full%weight
+    if (allocated(ham_eff_cc%tau)) deallocate(ham_eff_cc%tau)
+    allocate(ham_eff_cc%tau(3, n_cc))
+    write(stdout, '(A)') 'DEBUG: allocated tau'
+    ham_eff_cc%tau = ham_full%tau(:, cc_idx)  ! Only CC orbitals
+    write(stdout, '(A)') 'DEBUG: copied tau'
+    ham_eff_cc%r000 = ham_full%r000
+    !
+    if (allocated(ham_eff_cc%hr)) deallocate(ham_eff_cc%hr)
+    allocate(ham_eff_cc%hr(n_cc, n_cc, ham_full%nrpt))
+    write(stdout, '(A)') 'DEBUG: allocated hr'
+    !
+    write(stdout, '(A,I5,A)') 'DEBUG: starting loop over ', ham_full%nrpt, ' R-points'
+    do ir = 1, ham_full%nrpt
+      ! Extract blocks from full HR at this R
+      do ii = 1, n_cc
+        do jj = 1, n_cc
+          H_cc(ii, jj) = ham_full%hr(cc_idx(ii), cc_idx(jj), ir)
+        end do
+      end do
+      do ii = 1, n_cc
+        do jj = 1, n_ff
+          H_cf(ii, jj) = ham_full%hr(cc_idx(ii), ff_idx(jj), ir)
+        end do
+      end do
+      do ii = 1, n_ff
+        do jj = 1, n_cc
+          H_fc(ii, jj) = ham_full%hr(ff_idx(ii), cc_idx(jj), ir)
+        end do
+      end do
+      do ii = 1, n_ff
+        do jj = 1, n_ff
+          H_ff(ii, jj) = ham_full%hr(ff_idx(ii), ff_idx(jj), ir)
+        end do
+      end do
+      !
+      ! Check if H_ff is zero (singular). If so, skip Schur complement term.
+      ! This occurs when there is no FF-FF hopping at this R-vector.
+      if (maxval(abs(H_ff)) < eps6) then
+        ! H_ff is zero: no FF propagation at this R, effective H = H_cc
+        ! (The off-diagonal coupling H_cf and H_fc don't contribute without FF hopping)
+      else
+        ! Invert H_FF: H_ff_inv = H_ff^{-1}
+        H_ff_inv = H_ff
+        call invmat(H_ff_inv, n_ff)
+        !
+        ! Compute H_cf * H_ff_inv * H_fc
+        ! tmp = H_cf * H_ff_inv
+        call zgemm('N', 'N', n_cc, n_ff, n_ff, cmplx_1, H_cf, n_cc, &
+                    H_ff_inv, n_ff, cmplx_0, tmp, n_cc)
+        ! H_eff_cc = H_cc - tmp * H_fc  (use H_cc as output, needs beta=1 to accumulate)
+        call zgemm('N', 'N', n_cc, n_cc, n_ff, -cmplx_1, tmp, n_cc, &
+                    H_fc, n_ff, cmplx_1, H_cc, n_cc)
+      endif
+      !
+      ham_eff_cc%hr(:, :, ir) = H_cc
+      !
+    end do
+    !
+  END SUBROUTINE downfold_rspace
   !
   ! ---------------------------------------------------------------------------
-  SUBROUTINE determine_cc_indices(cc_idx, norb_full, norb_bare, &
-                                   nbasis_full, nbasis_bare, nsite_full, nsite_bare)
+  SUBROUTINE normalize_spin_direction(raw_vec, unit_vec, raw_norm)
     !
-    ! Determine which orbital indices (1..norb_full) are CC orbitals.
-    ! Strategy: compare site nbasis. Sites in seedbare match sites in seed
-    ! with the same orbital count; any extra in seed are FF orbitals.
+    ! Remove the exact scalar-mode J/|S| redundancy by using a unit spin direction.
     !
-    ! ASSUMPTIONS (must hold for correct results):
-    !   1. Site ordering in seed.pos and seedbare.pos must match (site i in seed
-    !      corresponds to site i in seedbare). The walk pairs sites sequentially.
-    !   2. At each shared site, CC orbitals come FIRST (lower Wannier90 band index),
-    !      and extra (FF) orbitals come after (indices > nbasis_bare(i)).
-    !      This depends on the projection block order in the Wannier90 input.
-    !   3. Same nbasis count at a site implies same orbital character.
-    !      Cases where count matches but character differs (e.g., seed has d+f,
-    !      seedbare has d+s) will silently mislabel orbitals.
-    ! If these assumptions may not hold, use the 'cc_orbital_indices' override
-    ! in &EFFJS namelist (future feature) to specify CC indices explicitly.
+    real(dp), dimension(3), intent(in)  :: raw_vec
+    real(dp), dimension(3), intent(out) :: unit_vec
+    real(dp),               intent(out) :: raw_norm
     !
-    ! For spinor: CC orbitals = first n_c orbital indices for spin-up, then n_c for spin-down.
-    ! The FF orbitals are those present in seed but not seedbare (by site/orbital count).
-    !
-    integer, intent(in) :: norb_full, norb_bare, nsite_full, nsite_bare
-    integer, dimension(nsite_full), intent(in) :: nbasis_full
-    integer, dimension(nsite_bare), intent(in) :: nbasis_bare
-    integer, dimension(norb_bare), intent(out) :: cc_idx
-    !
-    integer :: ii, jj, g_orb, cc_count
-    logical, dimension(norb_full) :: is_cc
-    !
-    ! Mark which global orbitals are CC (conduction) by comparing site-by-site
-    ! For spinor: norb = 2 * n_spatial, first half spin-up, second half spin-down
-    ! norb_full = 2 * n_spatial_full, norb_bare = 2 * n_spatial_bare
-    !
-    ! Simple strategy: CC orbitals are those NOT associated with f-sites.
-    ! The f-site orbitals are the EXTRA orbitals in seed (not in seedbare).
-    ! We find them by walking through sites: if a site has more orbitals in
-    ! seed than in seedbare, the extras are FF.
-    !
-    is_cc(:) = .true.
-    g_orb = 0
-    do ii = 1, min(nsite_full, nsite_bare)
-      ! For this site, mark all as CC (up to seedbare nbasis count)
-      ! Extra orbitals (beyond seedbare) are FF
-      do jj = 1, nbasis_full(ii)
-        g_orb = g_orb + 1
-        if (jj > nbasis_bare(ii)) then
-          is_cc(g_orb) = .false.  ! FF orbital
-        endif
-      enddo
-    enddo
-    ! Sites in seed not in seedbare -> all FF
-    do ii = min(nsite_full, nsite_bare)+1, nsite_full
-      do jj = 1, nbasis_full(ii)
-        g_orb = g_orb + 1
-        is_cc(g_orb) = .false.
-      enddo
-    enddo
-    !
-    ! For spinor: also mark the spin-down FF orbitals
-    ! The spin-down block starts at norb_full/2 + 1
-    if (norb_full > g_orb) then
-      do ii = 1, g_orb
-        is_cc(g_orb + ii) = is_cc(ii)
-      enddo
+    raw_norm = sqrt(sum(raw_vec**2))
+    if (raw_norm > eps6) then
+      unit_vec = raw_vec / raw_norm
+    else
+      unit_vec = (/0.0_dp, 0.0_dp, 1.0_dp/)
     endif
     !
-    ! Collect CC indices
-    cc_count = 0
-    do ii = 1, norb_full
-      if (is_cc(ii)) then
-        cc_count = cc_count + 1
-        if (cc_count <= norb_bare) cc_idx(cc_count) = ii
-      endif
+  END SUBROUTINE normalize_spin_direction
+  !
+  ! ---------------------------------------------------------------------------
+  SUBROUTINE reconstruct_hr_from_hk(ham_hr, hk_k, nk, kmesh, kw)
+    !
+    ! Inverse transform consistent with calc_hk:
+    !   hk_ij(k) = sum_R exp(+ik.R)/w_R * exp[-ik.tau_i] exp[+ik.tau_j] hr_ij(R)
+    ! so
+    !   hr_ij(R) = w_R * sum_k kw(k) exp[-ik.R] exp[+ik.tau_i] exp[-ik.tau_j] hk_ij(k)
+    !
+    TYPE(wannham), intent(inout) :: ham_hr
+    integer, intent(in) :: nk
+    complex(dp), dimension(:, :, :), intent(in) :: hk_k
+    real(dp),    dimension(:, :), intent(in) :: kmesh
+    real(dp),    dimension(:),    intent(in) :: kw
+    !
+    integer :: ir, ik, io, jo
+    real(dp) :: rdotk, ktau, sum_kwt
+    complex(dp) :: rphase
+    complex(dp), allocatable :: orb_phase(:)
+    !
+    sum_kwt = sum(kw(1:nk))
+    if (sum_kwt <= eps6) then
+      write(stdout, *) 'ERROR: reconstruct_hr_from_hk got non-positive k-weight sum'
+      stop 1
+    endif
+    !
+    allocate(orb_phase(ham_hr%norb))
+    ham_hr%hr = cmplx_0
+    !
+    do ik = 1, nk
+      do io = 1, ham_hr%norb
+        ktau = sum(kmesh(:, ik) * ham_hr%tau(:, io)) * twopi
+        orb_phase(io) = cmplx(cos(ktau), sin(ktau), KIND=dp)
+      enddo
+      !
+      do ir = 1, ham_hr%nrpt
+        rdotk = sum(ham_hr%rvec(:, ir) * kmesh(:, ik)) * twopi
+        rphase = cmplx(cos(rdotk), -sin(rdotk), KIND=dp)
+        do io = 1, ham_hr%norb
+          do jo = 1, ham_hr%norb
+            ham_hr%hr(io, jo, ir) = ham_hr%hr(io, jo, ir) + kw(ik) * ham_hr%weight(ir) * &
+                rphase * orb_phase(io) * conjg(orb_phase(jo)) * hk_k(io, jo, ik)
+          enddo
+        enddo
+      enddo
     enddo
     !
-  END SUBROUTINE determine_cc_indices
+    ham_hr%hr = ham_hr%hr / sum_kwt
+    deallocate(orb_phase)
+    !
+  END SUBROUTINE reconstruct_hr_from_hk
+  !
+  ! ---------------------------------------------------------------------------
+  SUBROUTINE validate_hr_reconstruction(ham_hr, hk_ref, nk, kmesh, max_err)
+    !
+    ! Check that calc_hk(reconstructed HR) reproduces the target H(k).
+    !
+    TYPE(wannham), intent(in) :: ham_hr
+    integer, intent(in) :: nk
+    complex(dp), dimension(:, :, :), intent(in) :: hk_ref
+    real(dp),    dimension(:, :), intent(in) :: kmesh
+    real(dp), intent(out) :: max_err
+    !
+    integer :: ik
+    complex(dp), allocatable :: hk_chk(:,:)
+    !
+    allocate(hk_chk(ham_hr%norb, ham_hr%norb))
+    max_err = 0.0_dp
+    !
+    do ik = 1, nk
+      call calc_hk(hk_chk, ham_hr, kmesh(:, ik))
+      max_err = max(max_err, maxval(abs(hk_chk - hk_ref(:, :, ik))))
+    enddo
+    !
+    deallocate(hk_chk)
+    !
+  END SUBROUTINE validate_hr_reconstruction
+  !
+  ! ---------------------------------------------------------------------------
+  SUBROUTINE init_periodic_reconstruction_ham(ham_template, nk1, nk2, nk3, ham_hr)
+    !
+    ! Build a complete periodic real-space grid matching an automatic nk1*nk2*nk3 mesh.
+    !
+    TYPE(wannham), intent(in)  :: ham_template
+    TYPE(wannham), intent(out) :: ham_hr
+    integer, intent(in) :: nk1, nk2, nk3
+    !
+    integer :: ir1, ir2, ir3, idx
+    integer :: r1, r2, r3
+    !
+    ham_hr%norb = ham_template%norb
+    ham_hr%nrpt = nk1 * nk2 * nk3
+    allocate(ham_hr%hr(ham_hr%norb, ham_hr%norb, ham_hr%nrpt))
+    allocate(ham_hr%weight(ham_hr%nrpt))
+    allocate(ham_hr%rvec(3, ham_hr%nrpt))
+    allocate(ham_hr%tau(3, ham_hr%norb))
+    ham_hr%hr = cmplx_0
+    ham_hr%tau = ham_template%tau
+    ham_hr%weight = 1.0_dp
+    ham_hr%r000 = -1
+    !
+    idx = 0
+    do ir1 = 0, nk1 - 1
+      r1 = ir1
+      if (r1 > nk1 / 2) r1 = r1 - nk1
+      do ir2 = 0, nk2 - 1
+        r2 = ir2
+        if (r2 > nk2 / 2) r2 = r2 - nk2
+        do ir3 = 0, nk3 - 1
+          r3 = ir3
+          if (r3 > nk3 / 2) r3 = r3 - nk3
+          idx = idx + 1
+          ham_hr%rvec(:, idx) = real((/r1, r2, r3/), dp)
+          if (r1 == 0 .and. r2 == 0 .and. r3 == 0) ham_hr%r000 = idx
+        enddo
+      enddo
+    enddo
+    !
+    if (ham_hr%r000 < 1) then
+      write(stdout, *) 'ERROR: periodic reconstruction grid did not include R=0'
+      stop 1
+    endif
+    !
+  END SUBROUTINE init_periodic_reconstruction_ham
   !
   ! ---------------------------------------------------------------------------
   SUBROUTINE add_js_coupling(ham_out, norb_bare, J_val, Svec, irpt)
@@ -222,6 +347,7 @@ CONTAINS
     integer :: ik, n_jrpt_local
     real(dp) :: J_0
     real(dp), dimension(3) :: Svec
+    real(dp) :: sraw_norm
     complex(dp), allocatable :: hk_bare(:,:), hk_tmp1(:,:), hk_tmp2(:,:)
     real(dp),    allocatable :: eig_trial(:), eig_eff(:)
     !
@@ -230,7 +356,7 @@ CONTAINS
     ! Unpack parameters
     if (.not. g_J_TENSOR) then
       J_0      = params(1)
-      Svec(1:3)= params(2:4)
+      call normalize_spin_direction(params(2:4), Svec, sraw_norm)
     else
       J_0      = 0.0_dp
       Svec(1:3)= params(n_jrpt_local+1:n_jrpt_local+3)
@@ -360,13 +486,13 @@ END MODULE wanneff_js_mod
 ! ===========================================================================
 PROGRAM WannEffJS
   !
-  use constants,       only : stdout, dp, cmplx_0, fin
+  use constants,       only : stdout, dp, cmplx_0, fin, twopi, eps6
   use para,            only : init_para, inode, finalize_para, distribute_calc, &
                                first_idx, last_idx, para_merge_cmplx, para_sync_logical, &
                                para_sync0
   use wanndata,        only : wannham, read_ham, wannham_shift_ef, calc_hk, &
                                write_ham, finalize_wann
-  use lattice,         only : read_posfile, read_kmesh, ham, nkirr, kvec, kwt, &
+  use lattice,         only : read_posfile, read_kmesh, ham, nkirr, kvec, kwt, nk1, nk2, nk3, &
                                avec, nsite, nbasis, spinor, xat, finalize_lattice_kmesh, &
                                finalize_lattice_structure, finalize_lattice_ham, &
                                find_ws
@@ -376,7 +502,9 @@ PROGRAM WannEffJS
                                J_TENSOR, tol_Jeff, J_R_range, bayes_niter, &
                                J_bounds, S_bounds, mc_supercell, sigma_broadening, &
                                berry_curvature_output, &
-                               read_qpoints, nqpt, qvec
+                               ff_orbital_indices, n_ff_orbital_indices, &
+                               read_qpoints, nqpt, qvec, &
+                               emin, emax, nnu
   use bayesian,        only : bayesian_optimize
   use classical_mc,    only : classical_mc_run
   use transp_calc,     only : calc_sigma_xy, calc_sigma_xx, calc_berry_curvature_kmap
@@ -391,7 +519,7 @@ PROGRAM WannEffJS
   ! Note: global 'ham' from lattice module is used as ham_full (full system with f)
   !
   integer :: norb_full, norb_bare, norb_cc
-  integer, allocatable :: cc_idx(:)
+  integer, allocatable :: cc_idx(:), ff_idx(:)
   integer, allocatable :: nbasis_full(:), nbasis_bare(:)
   integer :: nsite_full, nsite_bare, nsite_f
   !
@@ -403,7 +531,7 @@ PROGRAM WannEffJS
   real(dp), dimension(:), allocatable :: params_opt
   real(dp), dimension(:,:), allocatable :: bounds_bayes
   real(dp), dimension(3) :: Svec_opt
-  real(dp) :: J_opt, S_mag_opt, J_mc_used
+  real(dp) :: J_opt, S_mag_opt, J_mc_used, L2_best
   real(dp), allocatable :: jeff_R(:)
   !
   real(dp), allocatable :: mvec_vs_T(:,:)
@@ -413,11 +541,17 @@ PROGRAM WannEffJS
   real(dp), allocatable :: omega_kmap_seed(:), omega_kmap_bare(:), omega_kmap_eff(:)
   !
   real(dp), allocatable :: frac_pos_f(:,:)
-  integer :: ik, ii, jj, n_pruned, io_tmp, iq_js
+  integer :: ik, ii, jj, n_pruned, io_tmp, iq_js, n_ff, ir, ir_r0, iom
+  real(dp) :: rdotk, val, max_val, hr_recon_err, sraw_norm, omega_s
+  complex(dp) :: phase
+  integer :: max_i, max_j
+  logical :: is_ff, use_periodic_downfold_grid
   character(len=120) :: fname_out
   ! Eigenvalue comparison variables (JS_result.dat)
-  complex(dp), allocatable :: hk_js_seed(:,:), hk_js_eff(:,:)
-  real(dp),    allocatable :: eig_js_seed(:),  eig_js_eff(:)
+  complex(dp), allocatable :: hk_js_full(:,:), hk_js_eff(:,:), hk_full_tmp(:,:)
+  real(dp),    allocatable :: eig_js_full(:),  eig_js_eff(:)
+  ! Downfold HR variables
+  TYPE(wannham) :: ham_downfold
   CALL init_para('WannEffJS')
   CALL read_effjs_input('wanneff')
   !
@@ -484,19 +618,60 @@ PROGRAM WannEffJS
   !
   ! ---- K-mesh ----
   CALL read_kmesh('IBZKPT')
+  CALL distribute_calc(nkirr)  ! set up first_idx, last_idx for k-point parallelization
   !
   ! ---- CC indices ----
+  ! Build cc_idx: all seed indices that are NOT FF
+  ! FF indices are explicitly provided via ff_orbital_indices
+  ! CC indices in seed correspond to seedbare indices 1, 2, 3, ... in order
   allocate(cc_idx(norb_cc))
-  CALL determine_cc_indices(cc_idx, norb_full, norb_bare, &
-                              nbasis_full, nbasis_bare, nsite_full, nsite_bare)
+  if (n_ff_orbital_indices > 0) then
+    ! Build cc_idx = all seed indices NOT in ff_orbital_indices
+    jj = 0
+    do ii = 1, norb_full
+      is_ff = any(ff_orbital_indices(1:n_ff_orbital_indices) == ii)
+      if (.not. is_ff) then
+        jj = jj + 1
+        if (jj <= norb_cc) cc_idx(jj) = ii
+      endif
+    enddo
+    if (jj /= norb_cc) then
+      if (inode .eq. 0) write(stdout, *) "ERROR: number of CC indices ", jj, &
+                                         " /= norb_cc ", norb_cc
+      stop 1
+    endif
+  else
+    ! No FF specified: assume first norb_bare indices are CC (backward compatible)
+    do ii = 1, norb_cc
+      cc_idx(ii) = ii
+    enddo
+  endif
+  !
+  if (any(cc_idx < 1) .or. any(cc_idx > norb_full)) then
+    if (inode .eq. 0) write(stdout, *) 'ERROR: invalid CC orbital indices'
+    stop 1
+  endif
+  !
+  ! Build ff_idx: FF orbital indices from user input
+  ! norb_ff = n_ff_orbital_indices (FF orbitals are exactly what user specified)
+  allocate(ff_idx(norb_full - norb_cc))
+  do ii = 1, norb_full - norb_cc
+    ff_idx(ii) = ff_orbital_indices(ii)
+  end do
   !
   if (inode .eq. 0) then
+    write(stdout, '(A)') "=== Downfolding Debug ==="
     write(stdout, '(A,1I5)') "  norb_full = ", norb_full
     write(stdout, '(A,1I5)') "  norb_bare = ", norb_bare
     write(stdout, '(A,1I5)') "  norb_cc   = ", norb_cc
+    write(stdout, '(A,1I5)') "  norb_ff   = ", norb_full - norb_cc
     write(stdout, '(A,1I5)') "  n_kpts    = ", nkirr
-    write(stdout, *) "  CC orbital indices: "
+    write(stdout, '(A,1I5)') "  n_ff_orbital_indices = ", n_ff_orbital_indices
+    write(stdout, '(A)') "  FF orbital indices:"
+    write(stdout, '(10I5)') ff_idx
+    write(stdout, '(A)') "  CC orbital indices:"
     write(stdout, '(10I5)') cc_idx
+    write(stdout, '(A)') "========================="
   endif
   !
   ! ---- Set up J(R) R-grid (tensor mode) ----
@@ -523,19 +698,29 @@ PROGRAM WannEffJS
     n_jrpt = 0
   endif
   !
-  ! ---- Downfolding loop ----
-  ! Use global 'ham' (the full system hamiltonian) for calc_hk
+  ! ---- R-space Schur complement downfolding ----
+  ! Uses downfold_rspace to compute H_eff_CC(R) = H_CC(R) - H_CF(R) * H_FF(R)^{-1} * H_FC(R)
+  ! This is the correct block matrix inversion that avoids ghost states from k-space approach.
   if (inode .eq. 0) CALL log_start('downfolding')
-  allocate(hk_full(norb_full, norb_full))
+  !
+  if (inode .eq. 0) then
+    write(stdout, '(A)') "  Using R-space Schur complement downfolding"
+    write(stdout, '(A,2I5)') "  norb_cc, n_ff = ", norb_cc, norb_full - norb_cc
+  endif
+  !
+  ! Call R-space downfolding (compute H_eff_CC in R-space via Schur complement)
+  write(stdout, '(A)') 'DEBUG: calling downfold_rspace...'
+  call downfold_rspace(ham_downfold, ham, cc_idx, ff_idx, norb_cc, norb_full - norb_cc)
+  write(stdout, '(A)') 'DEBUG: downfold_rspace returned successfully'
+  !
+  ! Allocate and compute g_hk_eff_cc from the R-space downfolded Hamiltonian
+  ! This is needed for js_objective to compute eigenvalues
   allocate(hk_eff_cc(norb_cc, norb_cc))
   allocate(g_hk_eff_cc(norb_cc, norb_cc, nkirr))
   g_hk_eff_cc = cmplx_0
   !
-  CALL distribute_calc(nkirr)
-  !
   do ik = first_idx, last_idx
-    CALL calc_hk(hk_full, ham, kvec(:, ik))   ! use global ham
-    CALL downfold_to_cc(hk_eff_cc, hk_full, norb_full, norb_cc, cc_idx)
+    CALL calc_hk(hk_eff_cc, ham_downfold, kvec(:, ik))
     g_hk_eff_cc(:, :, ik) = hk_eff_cc
   enddo
   !
@@ -544,6 +729,18 @@ PROGRAM WannEffJS
   if (inode .eq. 0) then
     write(stdout, *) "  Downfolding done."
     CALL log_stop('downfolding')
+  endif
+  !
+  ! ---- Write downfolded CC Hamiltonian to HR file ----
+  ! ham_downfold already contains the correct R-space H_eff_CC from downfold_rspace
+  if (inode .eq. 0) then
+    write(stdout, '(A,1I5,A)') "  Downfold HR written with ", ham_downfold%nrpt, " R-points"
+  endif
+  !
+  if (inode .eq. 0) then
+    write(fname_out, '(A,A)') trim(seed), '_downfold'
+    CALL write_ham(ham_downfold, trim(fname_out))
+    write(stdout, '(A,A)') '  Downfold HR written: ', trim(fname_out)
   endif
   !
   ! ---- Set up module-level globals for Bayesian callback ----
@@ -576,7 +773,12 @@ PROGRAM WannEffJS
       CALL bayesian_optimize(js_objective_callback, bounds_bayes, 4, params_opt, bayes_niter)
       !
       J_opt      = params_opt(1)
-      Svec_opt   = params_opt(2:4)
+      call normalize_spin_direction(params_opt(2:4), Svec_opt, sraw_norm)
+      if (J_opt > eps6) then
+        S_mag_opt = 1.0_dp
+      else
+        S_mag_opt = 0.0_dp
+      endif
       !
     else
       ! Tensor mode: (n_jrpt + 3) parameters
@@ -607,10 +809,13 @@ PROGRAM WannEffJS
       !
     endif
     !
-    S_mag_opt = sqrt(sum(Svec_opt**2))
+    if (J_TENSOR) S_mag_opt = sqrt(sum(Svec_opt**2))
+    L2_best   = js_objective_callback(params_opt, size(params_opt))
     write(stdout, '(A,1F10.5)') "  J_opt   = ", J_opt
     write(stdout, '(A,3F10.5)') "  Svec_opt= ", Svec_opt
     write(stdout, '(A,1F10.5)') "  |S|_opt = ", S_mag_opt
+    write(stdout, '(A,1G12.4)') "  L2_best = ", L2_best
+    CALL log_msg('Bayesian optimization done. Check L2_best in seed_JS.output')
     !
     ! ---- Write seed_JS.output ----
     write(fname_out, '(A,A)') trim(seed), '_JS.output'
@@ -629,6 +834,7 @@ PROGRAM WannEffJS
     write(99, '(A,F12.6)')  'S_y    ', Svec_opt(2)
     write(99, '(A,F12.6)')  'S_z    ', Svec_opt(3)
     write(99, '(A,F12.6)')  'S_mag  ', S_mag_opt
+    write(99, '(A,G12.4)')  'L2_best', L2_best
     if (J_TENSOR .and. n_jrpt > 0) then
       write(99, '(A,I6)')   'n_jrpt ', n_jrpt
       write(99, '(A)')      ''
@@ -689,22 +895,29 @@ PROGRAM WannEffJS
     CALL log_stop('transport_calc')
     !
     ! ---- Write seed_JS_result.dat: eigenvalue comparison along band path ----
+    ! Compares: seed (full) vs seed_downfold (H_eff_CC from downfolding)
+    ! The key validation: seed_downfold should match bare+JS (computed in Python)
     CALL read_qpoints   ! reads QPOINTS file -> nqpt, qvec
-    allocate(hk_js_seed(norb_full, norb_full), eig_js_seed(norb_full))
-    allocate(hk_js_eff(norb_bare,  norb_bare),  eig_js_eff(norb_bare))
+    allocate(hk_js_full(norb_full, norb_full), eig_js_full(norb_full))
+    allocate(hk_js_eff(norb_cc, norb_cc), eig_js_eff(norb_cc))
+    allocate(hk_full_tmp(norb_full, norb_full))
     write(fname_out, '(A,A)') trim(seed), '_JS_result.dat'
     open(unit=97, file=trim(fname_out), status='replace')
-    write(97, '(A,I5,A,I5)') '# norb_seed=', norb_full, '  norb_eff=', norb_bare
-    write(97, '(A)') '# q_x       q_y       q_z       eig_seed(1..N) eig_eff(1..M)'
+    write(97, '(A,I5,A,I5)') '# norb_seed=', norb_full, '  norb_eff=', norb_cc
+    write(97, '(A,F10.5,A,F10.5,A,F10.5,A,F10.5)') &
+        '# J_opt=', J_opt, ' S_x=', Svec_opt(1), ' S_y=', Svec_opt(2), ' S_z=', Svec_opt(3)
+    write(97, '(A)') '# q_x       q_y       q_z       eig_full(1..N) eig_downfold(1..M)'
     do iq_js = 1, nqpt
-      call calc_hk(hk_js_seed, ham,     qvec(:, iq_js))
-      call eigen(eig_js_seed, hk_js_seed, norb_full)
-      call calc_hk(hk_js_eff,  ham_out, qvec(:, iq_js))
-      call eigen(eig_js_eff,  hk_js_eff,  norb_bare)
-      write(97, '(3F10.5,100F10.4)') qvec(:, iq_js), eig_js_seed, eig_js_eff
+      ! Full seed eigenvalues
+      call calc_hk(hk_js_full, ham, qvec(:, iq_js))
+      call eigen(eig_js_full, hk_js_full, norb_full)
+      ! Seed_downfold: use ham_downfold (R-space Schur complement) directly
+      call calc_hk(hk_js_eff, ham_downfold, qvec(:, iq_js))
+      call eigen(eig_js_eff, hk_js_eff, norb_cc)
+      write(97, '(3F10.5,100F10.4)') qvec(:, iq_js), eig_js_full, eig_js_eff
     enddo
     close(97)
-    deallocate(hk_js_seed, eig_js_seed, hk_js_eff, eig_js_eff)
+    deallocate(hk_js_full, eig_js_full, hk_js_eff, eig_js_eff, hk_full_tmp)
     write(stdout, '(A,A)') '  JS result written: ', trim(fname_out)
     !
   endif

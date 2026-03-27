@@ -45,7 +45,7 @@ except ImportError:
 # Constants
 # ============================================================
 TSS  = -1.0
-TSF  = -0.2    # local-limit: small tsf, J_SW = tsf^2/ef = 0.04/0.4 ~ 0.10 eV
+TSF  = -0.5    # increased from 0.2: J_SW = tsf^2/ef = 0.25/0.4 ~ 0.63 eV
 TSF2 = 0.0
 EF_KAGOME = 0.4  # f within ±0.5 eV of E_F, still above for stable downfolding
 
@@ -76,7 +76,7 @@ NORB_BARE_CUBIC = 4    # 2 spatial x 2 spin
 NBASIS_SEED_CUBIC = np.array([1, 2])  # site1: 1 orb(s), site2: 2 orbs(s+f)
 NBASIS_BARE_CUBIC = np.array([1, 1])  # site1: 1 orb(s), site2: 1 orb(s)
 TSS_CUBIC = -1.0   # s-s NN hopping (eV)
-TSF_CUBIC = -0.2   # local-limit approximation: small tsf
+TSF_CUBIC = -0.5   # increased from 0.2: J_SW = tsf^2/ef
 EF_CUBIC  = 0.4    # f within ±0.5 eV of E_F
 
 # ============================================================
@@ -276,7 +276,8 @@ def write_wanneff_inp(fname, seed='seed', seedbare='seedbare',
                       mc_temperature=(0.0, 0.000172, 0.01724),
                       J_TENSOR=False, J_R_range=(0,0,0,0,0,0),
                       mu=0.0, nnu=300, emin=-4.0, emax=4.0,
-                      bayes_niter=100, berry_curvature_output=False):
+                      bayes_niter=100, berry_curvature_output=False,
+                      ff_orbital_indices=None):
     mc_str = f"{mc_temperature[0]}, {mc_temperature[1]}, {mc_temperature[2]}"
     jr_str = " ".join(str(x) for x in J_R_range)
     with open(fname, 'w') as f:
@@ -297,6 +298,10 @@ def write_wanneff_inp(fname, seed='seed', seedbare='seedbare',
         f.write(f"  tol_Jeff=1e-2,\n")
         if berry_curvature_output:
             f.write(f"  berry_curvature_output=.true.,\n")
+        if ff_orbital_indices is not None:
+            ff_str = ", ".join(str(x) for x in ff_orbital_indices)
+            f.write(f"  n_ff_orbital_indices={len(ff_orbital_indices)},\n")
+            f.write(f"  ff_orbital_indices={ff_str},\n")
         f.write("/\n")
 
 
@@ -471,7 +476,8 @@ def test_full_pipeline_e2e(outdir, exe_wanneff=None, exe_wannband=None):
         eff_js=True, eff_mc=True,
         mc_temperature=(0.0, 0.000172, 0.01724),  # eV, 0 to ~200K
         J_TENSOR=False,
-        bayes_niter=100
+        bayes_niter=100,
+        ff_orbital_indices=[5, 10]  # f_up, f_dn in kagome seed
     )
 
     # Step 3: Run wanneff_js.x
@@ -513,13 +519,14 @@ def test_full_pipeline_e2e(outdir, exe_wanneff=None, exe_wannband=None):
     hr_files = sorted(glob.glob(os.path.join(outdir, 'seedbare_hr_*K_hr.dat')))
     print(f"  [6] Found {len(hr_files)} temperature HR files")
 
-    # Step 6b: Band comparison — seed (full with f) vs seedbare (bare, no f) vs seedbare_hr_0K (bare+JS)
-    print("  [6b] Band comparison: seed / seedbare / seedbare_hr_0K...")
+    # Step 6b: Band comparison — 4 panels: seed, seed_downfold, seedbare, seedbare+JS
+    print("  [6b] Band comparison: seed / seed_downfold / seedbare / seedbare+JS...")
     if exe_wannband:
         for src_seed, spec_label, pos_src in [
-            ('seed',          'full',      'seed.pos'),
-            ('seedbare',      'bare',      'seedbare.pos'),
-            ('seedbare_hr_0K','effective', 'seedbare.pos'),
+            ('seed',           'full',      'seed.pos'),
+            ('seed_downfold',  'downfold',  'seedbare.pos'),   # CC block from seed
+            ('seedbare',       'bare',      'seedbare.pos'),
+            ('seedbare_hr_0K', 'effective', 'seedbare.pos'),
         ]:
             pos_dst = os.path.join(outdir, f'{src_seed}.pos')
             if not os.path.exists(pos_dst):
@@ -535,14 +542,17 @@ def test_full_pipeline_e2e(outdir, exe_wanneff=None, exe_wannband=None):
             else:
                 print(f"      {src_seed}: wannband.x failed (rc={rc_b})")
         if HAS_MATPLOTLIB:
-            fig_cmp, axes_cmp = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+            fig_cmp, axes_cmp = plt.subplots(1, 4, figsize=(24, 5), sharey=True)
             plot_bands(os.path.join(outdir, 'spectra_full.dat'),
-                       title="seed (full, with f-electron)", ax=axes_cmp[0])
+                       title="seed (full, with f)", ax=axes_cmp[0])
+            plot_bands(os.path.join(outdir, 'spectra_downfold.dat'),
+                       title="seed_downfold (H_CC from downfold)", ax=axes_cmp[1])
             plot_bands(os.path.join(outdir, 'spectra_bare.dat'),
-                       title="seedbare (bare, no f, no JS)", ax=axes_cmp[1])
+                       title="seedbare (bare, no f)", ax=axes_cmp[2])
+            eff_title = f"seedbare+J·S (J={J_opt:.3f}, S=({js_out.get('S_x',0):.2f},{js_out.get('S_y',0):.2f},{js_out.get('S_z',0):.2f}))"
             plot_bands(os.path.join(outdir, 'spectra_effective.dat'),
-                       title="seedbare+J·S (effective, T=0)", ax=axes_cmp[2])
-            plt.suptitle("Band comparison: seed vs bare vs bare+J·S (kagome+f)")
+                       title=eff_title, ax=axes_cmp[3])
+            plt.suptitle("Band comparison: seed vs seed_downfold vs seedbare vs bare+J·S (kagome+f)")
             plt.tight_layout()
             plt.savefig(os.path.join(outdir, 'fig_band_comparison.png'), dpi=150)
             plt.close()
@@ -767,7 +777,8 @@ def generate_cubic_test_data(outdir):
         seed='seed', seedbare='seedbare',
         eff_js=True, eff_mc=True,
         mc_temperature=(0.0, 0.00026, 0.026),  # ~0 to 300K, step ~3K
-        J_TENSOR=False, bayes_niter=100
+        J_TENSOR=False, bayes_niter=100,
+        ff_orbital_indices=[3, 6]  # f2_up, f2_dn in cubic seed
     )
     print(f"  Files written to {outdir}/")
     return rvecs, weights, hr_seed, hr_bare
@@ -818,13 +829,14 @@ def test_cubic_pipeline(outdir, exe_wanneff=None, exe_wannband=None):
     hr_files = sorted(glob.glob(os.path.join(outdir, 'seedbare_hr_*K_hr.dat')))
     print(f"  [6] Found {len(hr_files)} temperature HR files")
 
-    # Step 6b: Band comparison — seed (full) vs seedbare (bare) vs seedbare_hr_0K (bare+JS)
-    print("  [6b] Band comparison: seed / seedbare / seedbare_hr_0K (cubic)...")
+    # Step 6b: Band comparison — 4 panels: seed, seed_downfold, seedbare, seedbare+JS
+    print("  [6b] Band comparison: seed / seed_downfold / seedbare / seedbare+JS (cubic)...")
     if exe_wannband:
         for src_seed, spec_label, pos_src in [
-            ('seed',          'cubic_full',      'seed.pos'),
-            ('seedbare',      'cubic_bare',      'seedbare.pos'),
-            ('seedbare_hr_0K','cubic_effective', 'seedbare.pos'),
+            ('seed',           'cubic_full',      'seed.pos'),
+            ('seed_downfold',  'cubic_downfold',  'seedbare.pos'),
+            ('seedbare',       'cubic_bare',      'seedbare.pos'),
+            ('seedbare_hr_0K', 'cubic_effective', 'seedbare.pos'),
         ]:
             pos_dst = os.path.join(outdir, f'{src_seed}.pos')
             if not os.path.exists(pos_dst):
@@ -840,14 +852,17 @@ def test_cubic_pipeline(outdir, exe_wanneff=None, exe_wannband=None):
             else:
                 print(f"      {src_seed}: wannband.x failed (rc={rc_b})")
         if HAS_MATPLOTLIB:
-            fig_cmp, axes_cmp = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+            fig_cmp, axes_cmp = plt.subplots(1, 4, figsize=(24, 5), sharey=True)
             plot_bands(os.path.join(outdir, 'spectra_cubic_full.dat'),
-                       title="seed (full, with f-electron)", ax=axes_cmp[0])
+                       title="seed (full, with f)", ax=axes_cmp[0])
+            plot_bands(os.path.join(outdir, 'spectra_cubic_downfold.dat'),
+                       title="seed_downfold (H_CC from downfold)", ax=axes_cmp[1])
             plot_bands(os.path.join(outdir, 'spectra_cubic_bare.dat'),
-                       title="seedbare (bare, no f, no JS)", ax=axes_cmp[1])
+                       title="seedbare (bare, no f)", ax=axes_cmp[2])
+            eff_title = f"seedbare+J·S (J={J_opt:.3f}, S=({js_out.get('S_x',0):.2f},{js_out.get('S_y',0):.2f},{js_out.get('S_z',0):.2f}))"
             plot_bands(os.path.join(outdir, 'spectra_cubic_effective.dat'),
-                       title="seedbare+J·S (effective, T=0)", ax=axes_cmp[2])
-            plt.suptitle("Band comparison: seed vs bare vs bare+J·S (3D cubic)")
+                       title=eff_title, ax=axes_cmp[3])
+            plt.suptitle("Band comparison: seed vs seed_downfold vs seedbare vs bare+J·S (3D cubic)")
             plt.tight_layout()
             plt.savefig(os.path.join(outdir, 'fig_cubic_band_comparison.png'), dpi=150)
             plt.close()
@@ -977,6 +992,11 @@ def test_tensor_pipeline(outdir, exe_wanneff=None, exe_wannband=None,
 
     # Step 2: Write wanneff.inp with J_TENSOR=True
     print(f"  [2] Writing wanneff.inp (J_TENSOR=True, J_R_range=±1)...")
+    # Determine FF indices based on label
+    if 'cubic' in label:
+        ff_indices = [3, 6]  # cubic: f2_up, f2_dn
+    else:
+        ff_indices = [5, 10]  # kagome: f_up, f_dn
     write_wanneff_inp(
         os.path.join(outdir, 'wanneff.inp'),
         seed='seed', seedbare='seedbare',
@@ -985,7 +1005,8 @@ def test_tensor_pipeline(outdir, exe_wanneff=None, exe_wannband=None,
         J_TENSOR=True,
         J_R_range=(-1, 1, -1, 1, -1, 1),
         bayes_niter=100,
-        emin=emin, emax=emax
+        emin=emin, emax=emax,
+        ff_orbital_indices=ff_indices
     )
 
     # Step 3: Run wanneff_js.x
@@ -1019,13 +1040,14 @@ def test_tensor_pipeline(outdir, exe_wanneff=None, exe_wannband=None,
     hr_files = sorted(glob.glob(os.path.join(outdir, 'seedbare_hr_*K_hr.dat')))
     print(f"  [6] Found {len(hr_files)} temperature HR files")
 
-    # Step 6b: Band comparison
-    print(f"  [6b] Band comparison: seed / seedbare / seedbare_hr_0K ({label})...")
+    # Step 6b: Band comparison — 4 panels: seed, seed_downfold, seedbare, seedbare+JS
+    print(f"  [6b] Band comparison: seed / seed_downfold / seedbare / seedbare+JS ({label})...")
     if exe_wannband:
         for src_seed, spec_label, pos_src in [
-            ('seed',          f'{label}_full',      'seed.pos'),
-            ('seedbare',      f'{label}_bare',      'seedbare.pos'),
-            ('seedbare_hr_0K',f'{label}_effective', 'seedbare.pos'),
+            ('seed',           f'{label}_full',      'seed.pos'),
+            ('seed_downfold',  f'{label}_downfold', 'seedbare.pos'),
+            ('seedbare',       f'{label}_bare',     'seedbare.pos'),
+            ('seedbare_hr_0K', f'{label}_effective','seedbare.pos'),
         ]:
             pos_dst = os.path.join(outdir, f'{src_seed}.pos')
             if not os.path.exists(pos_dst):
@@ -1041,13 +1063,16 @@ def test_tensor_pipeline(outdir, exe_wanneff=None, exe_wannband=None,
             else:
                 print(f"      {src_seed}: wannband.x failed (rc={rc_b})")
         if HAS_MATPLOTLIB:
-            fig_cmp, axes_cmp = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+            fig_cmp, axes_cmp = plt.subplots(1, 4, figsize=(24, 5), sharey=True)
             plot_bands(os.path.join(outdir, f'spectra_{label}_full.dat'),
                        title="seed (full, with f)", ax=axes_cmp[0])
+            plot_bands(os.path.join(outdir, f'spectra_{label}_downfold.dat'),
+                       title="seed_downfold (H_CC)", ax=axes_cmp[1])
             plot_bands(os.path.join(outdir, f'spectra_{label}_bare.dat'),
-                       title="seedbare (bare, no f)", ax=axes_cmp[1])
+                       title="seedbare (bare, no f)", ax=axes_cmp[2])
+            eff_title = f"bare+J·S (J_TENSOR, S={S_mag:.2f})"
             plot_bands(os.path.join(outdir, f'spectra_{label}_effective.dat'),
-                       title="seedbare+J(R)·S (tensor, T=0)", ax=axes_cmp[2])
+                       title=eff_title, ax=axes_cmp[3])
             plt.suptitle(f"Band comparison: J_TENSOR ({label})")
             plt.tight_layout()
             plt.savefig(os.path.join(outdir, f'fig_{label}_band_comparison.png'), dpi=150)
@@ -1119,6 +1144,255 @@ def test_tensor_pipeline(outdir, exe_wanneff=None, exe_wannband=None,
 
 
 # ============================================================
+# Test 9: 3-site kagome lattice (proper flat band + f-decoration)
+# ============================================================
+
+# 3-site kagome constants: 3 vertices only, site 2 has s+f
+AVEC_K3 = AVEC  # same hexagonal lattice vectors
+SITES_K3 = np.array([
+    [0.5, 0.0, 0.0],   # kagome vertex 1 (s)
+    [0.0, 0.5, 0.0],   # kagome vertex 2 (s)
+    [0.5, 0.5, 0.0],   # kagome vertex 3 (s+f)
+])
+NBASIS_SEED_K3 = np.array([1, 1, 2])   # site2 has s+f
+NBASIS_BARE_K3 = np.array([1, 1, 1])   # s only → flat band
+NORB_SEED_K3 = 8   # (1+1+2)*2 spin
+NORB_BARE_K3 = 6   # 3*2 spin
+TSF_K3 = -0.5      # increased from 0.2: J_SW = tsf^2/ef
+
+
+def build_hr_seed_kagome3(rvecs, weights, avec):
+    """Build 8x8 spinor HR for 3-site kagome with f-decoration at site 2.
+    Spinor order: [s0_up, s1_up, s2_up, f2_up, s0_dn, s1_dn, s2_dn, f2_dn]
+    """
+    norb = NORB_SEED_K3; nrpt = rvecs.shape[1]
+    hr = np.zeros((norb, norb, nrpt), dtype=complex)
+    nn_dist = get_nn_distance(avec, SITES_K3)
+    nn_cutoff = nn_dist * 1.5
+    s_up = [0, 1, 2]; f_up = 3; s_dn = [4, 5, 6]; f_dn = 7
+    r000 = np.argmin(np.sum(rvecs**2, axis=0))
+    for ir in range(nrpt):
+        R = rvecs[:, ir]
+        # s-s hoppings between all 3 sites
+        for i in range(3):
+            for j in range(3):
+                d = distance(SITES_K3[i], SITES_K3[j], avec, R)
+                if d > 1e-8 and d < nn_cutoff:
+                    hr[s_up[i], s_up[j], ir] += TSS
+                    hr[s_dn[i], s_dn[j], ir] += TSS
+        # s-f hoppings: f on site2 to s on sites 0,1,2
+        for i in range(3):
+            d_fwd = distance(SITES_K3[2], SITES_K3[i], avec, R)
+            if d_fwd > 1e-8 and d_fwd < nn_cutoff:
+                hr[f_up, s_up[i], ir] += TSF_K3
+                hr[f_dn, s_dn[i], ir] += TSF_K3
+            d_rev = distance(SITES_K3[i], SITES_K3[2], avec, R)
+            if d_rev > 1e-8 and d_rev < nn_cutoff:
+                hr[s_up[i], f_up, ir] += np.conj(TSF_K3)
+                hr[s_dn[i], f_dn, ir] += np.conj(TSF_K3)
+    # f on-site energy (EF_KAGOME) at R=0
+    hr[f_up, f_up, r000] += EF_KAGOME
+    hr[f_dn, f_dn, r000] += EF_KAGOME
+    return hr
+
+
+def build_hr_bare_kagome3(rvecs, weights, avec):
+    """Build 6x6 spinor HR for 3-site kagome (s-only → flat band).
+    Spinor order: [s0_up, s1_up, s2_up, s0_dn, s1_dn, s2_dn]
+    """
+    norb = NORB_BARE_K3; nrpt = rvecs.shape[1]
+    hr = np.zeros((norb, norb, nrpt), dtype=complex)
+    nn_dist = get_nn_distance(avec, SITES_K3)
+    nn_cutoff = nn_dist * 1.5
+    s_up = [0, 1, 2]; s_dn = [3, 4, 5]
+    for ir in range(nrpt):
+        R = rvecs[:, ir]
+        for i in range(3):
+            for j in range(3):
+                d = distance(SITES_K3[i], SITES_K3[j], avec, R)
+                if d > 1e-8 and d < nn_cutoff:
+                    hr[s_up[i], s_up[j], ir] += TSS
+                    hr[s_dn[i], s_dn[j], ir] += TSS
+    return hr
+
+
+def generate_kagome3_test_data(outdir):
+    """Generate HR and input files for 3-site kagome test."""
+    os.makedirs(outdir, exist_ok=True)
+    print("  Generating WS R-vectors (3-site kagome, nr=5)...")
+    rvecs, weights = find_ws_rvectors(5, 5, 1, AVEC_K3)
+    nrpt = rvecs.shape[1]
+    print(f"  nrpt = {nrpt}")
+    print("  Building 3-site kagome seed HR (flat band + f)...")
+    hr_seed = build_hr_seed_kagome3(rvecs, weights, AVEC_K3)
+    print("  Building 3-site kagome bare HR (flat band)...")
+    hr_bare = build_hr_bare_kagome3(rvecs, weights, AVEC_K3)
+    write_hr_dat(os.path.join(outdir, 'seed_hr.dat'),
+                 hr_seed, rvecs, weights, NORB_SEED_K3, nrpt)
+    write_hr_dat(os.path.join(outdir, 'seedbare_hr.dat'),
+                 hr_bare, rvecs, weights, NORB_BARE_K3, nrpt)
+    at_nums = [1, 1, 1]
+    write_pos_file(os.path.join(outdir, 'seed.pos'), AVEC_K3, SITES_K3,
+                   NBASIS_SEED_K3, at_nums, spinor=True)
+    write_pos_file(os.path.join(outdir, 'seedbare.pos'), AVEC_K3, SITES_K3,
+                   NBASIS_BARE_K3, at_nums, spinor=True)
+    write_ibzkpt(os.path.join(outdir, 'IBZKPT'), 12, 12, 1)
+    write_qpoints_bandpath(os.path.join(outdir, 'QPOINTS'))  # Γ-M-K-Γ
+    write_wanneff_inp(
+        os.path.join(outdir, 'wanneff.inp'),
+        seed='seed', seedbare='seedbare',
+        eff_js=True, eff_mc=True,
+        mc_temperature=(0.0, 0.000172, 0.01724),
+        J_TENSOR=False, bayes_niter=100,
+        ff_orbital_indices=[4, 8]  # f2_up, f2_dn in kagome3 seed
+    )
+    print(f"  Files written to {outdir}/")
+    return rvecs, weights, hr_seed, hr_bare
+
+
+def test_kagome3_pipeline(outdir, exe_wanneff=None, exe_wannband=None):
+    """
+    Test 9: 3-site kagome with proper flat band + f-decoration.
+    seedbare has 6 spinor orbs → classic kagome flat band.
+    seed has 8 spinor orbs → hybridized bands clearly distinct from seedbare.
+    """
+    print("\n" + "="*60)
+    print("TEST 9: 3-site kagome flat band + f-decoration (Fortran)")
+    print("="*60)
+
+    if exe_wanneff is None:
+        print("  wanneff_js.x not found, skipping")
+        return {'test': 'kagome3_pipeline', 'passed': None, 'details': 'wanneff_js.x not found'}
+
+    # Step 1: Generate test data
+    print("\n  [1] Generating 3-site kagome test data...")
+    generate_kagome3_test_data(outdir)
+
+    # Step 3: Run wanneff_js.x
+    print(f"  [3] Running wanneff_js.x...")
+    try:
+        rc, out, err = run_executable(exe_wanneff, workdir=outdir, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {'test': 'kagome3_pipeline', 'passed': False, 'details': 'timeout (600s)'}
+    print(f"      Return code: {rc}")
+    if rc != 0:
+        print(f"      FAILED.\n{err[:500]}")
+        return {'test': 'kagome3_pipeline', 'passed': False, 'details': f'rc={rc}: {err[:200]}'}
+
+    # Step 4: Parse outputs
+    print("  [4] Parsing seed_JS.output...")
+    js_out = parse_js_output(os.path.join(outdir, 'seed_JS.output'))
+    J_opt = js_out.get('J_opt'); S_mag = js_out.get('S_mag'); L2 = js_out.get('L2_best')
+    print(f"      J_opt={J_opt}, S_mag={S_mag}, L2_best={L2}")
+
+    # Step 5: Parse transport
+    temps_K, sigma_xy, sigma_xx = parse_transport_vs_T(
+        os.path.join(outdir, 'seed_transport_vs_T.dat'))
+    print(f"  [5] Transport data points: {len(temps_K)}")
+
+    # Step 6: HR files
+    hr_files = sorted(glob.glob(os.path.join(outdir, 'seedbare_hr_*K_hr.dat')))
+    print(f"  [6] Found {len(hr_files)} temperature HR files")
+
+    # Step 6b: Band comparison — 4 panels: seed, seed_downfold, seedbare, seedbare+JS
+    print("  [6b] Band comparison: seed / seed_downfold / seedbare / seedbare+JS (kagome3)...")
+    if exe_wannband:
+        for src_seed, spec_label, pos_src in [
+            ('seed',           'k3_full',      'seed.pos'),
+            ('seed_downfold',  'k3_downfold',  'seedbare.pos'),
+            ('seedbare',       'k3_bare',      'seedbare.pos'),
+            ('seedbare_hr_0K', 'k3_effective', 'seedbare.pos'),
+        ]:
+            pos_dst = os.path.join(outdir, f'{src_seed}.pos')
+            if not os.path.exists(pos_dst):
+                shutil.copy(os.path.join(outdir, pos_src), pos_dst)
+            with open(os.path.join(outdir, 'wannband.inp'), 'w') as f:
+                f.write(f"&SYSTEM\n  seed='{src_seed}', mu=0.0, spectra_calc=.true.\n/\n")
+                f.write("&CONTROL\n  nnu=200, emin=-6.0, emax=6.0, eps=1e-3\n/\n")
+            rc_b, _, _ = run_executable(exe_wannband, workdir=outdir, timeout=180)
+            spec_out = os.path.join(outdir, f'spectra_{spec_label}.dat')
+            if rc_b == 0 and os.path.exists(os.path.join(outdir, 'spectra.dat')):
+                shutil.move(os.path.join(outdir, 'spectra.dat'), spec_out)
+                print(f"      {src_seed}: bands OK -> spectra_{spec_label}.dat")
+            else:
+                print(f"      {src_seed}: wannband.x failed (rc={rc_b})")
+        if HAS_MATPLOTLIB:
+            fig_cmp, axes_cmp = plt.subplots(1, 4, figsize=(24, 5), sharey=True)
+            plot_bands(os.path.join(outdir, 'spectra_k3_full.dat'),
+                       title="seed (full, with f)", ax=axes_cmp[0])
+            plot_bands(os.path.join(outdir, 'spectra_k3_downfold.dat'),
+                       title="seed_downfold (H_CC from downfold)", ax=axes_cmp[1])
+            plot_bands(os.path.join(outdir, 'spectra_k3_bare.dat'),
+                       title="seedbare (bare, no f)", ax=axes_cmp[2])
+            eff_title = f"bare+J·S (J={J_opt:.3f}, S=({js_out.get('S_x',0):.2f},{js_out.get('S_y',0):.2f},{js_out.get('S_z',0):.2f}))"
+            plot_bands(os.path.join(outdir, 'spectra_k3_effective.dat'),
+                       title=eff_title, ax=axes_cmp[3])
+            plt.suptitle("Band comparison: 3-site kagome — seed vs seed_downfold vs seedbare vs bare+J·S")
+            plt.tight_layout()
+            plt.savefig(os.path.join(outdir, 'fig_k3_band_comparison.png'), dpi=150)
+            plt.close()
+            print("      Saved fig_k3_band_comparison.png")
+
+    # Step 7: Transport plot
+    if HAS_MATPLOTLIB and len(temps_K) > 1:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        ax1.plot(temps_K, sigma_xy, 'b-o', ms=2, lw=1.0)
+        ax1.set_xlabel("T (K)"); ax1.set_ylabel(r"$\sigma_{xy}$ ($e^2/h$)")
+        ax1.set_title("Hall (AHC)"); ax1.axhline(0, color='gray', lw=0.5, ls='--')
+        ax2.plot(temps_K, sigma_xx, 'r-o', ms=2, lw=1.0)
+        ax2.set_xlabel("T (K)"); ax2.set_ylabel(r"$\sigma_{xx}$ ($e^2/h$)")
+        ax2.set_title("Longitudinal (Kubo bubble)"); ax2.axhline(0, color='gray', lw=0.5, ls='--')
+        plt.suptitle("Transport vs T: 3-site kagome + f")
+        plt.tight_layout()
+        plt.savefig(os.path.join(outdir, 'fig_k3_transport_vs_T.png'), dpi=150)
+        plt.close()
+        print("      Saved fig_k3_transport_vs_T.png")
+
+    # Step 8: Band plots at selected T
+    target_T = [0, 10, 30, 90, 200]
+    bands_files = {}
+    if exe_wannband:
+        for T_K in target_T:
+            avail_T = []
+            for f in hr_files:
+                try:
+                    t_str = os.path.basename(f).replace('seedbare_hr_','').replace('K_hr.dat','')
+                    avail_T.append((abs(int(t_str)-T_K), int(t_str), f))
+                except: pass
+            if not avail_T: continue
+            avail_T.sort()
+            _, T_act, _ = avail_T[0]
+            sn = f'seedbare_hr_{T_act}K'
+            shutil.copy(os.path.join(outdir,'seedbare.pos'), os.path.join(outdir,f'{sn}.pos'))
+            with open(os.path.join(outdir,'wannband.inp'),'w') as f:
+                f.write(f"&SYSTEM\n  seed='{sn}', mu=0.0, spectra_calc=.true.\n/\n")
+                f.write("&CONTROL\n  nnu=200, emin=-6.0, emax=6.0, eps=1e-3\n/\n")
+            rc2, _, _ = run_executable(exe_wannband, workdir=outdir, timeout=120)
+            if rc2 == 0 and os.path.exists(os.path.join(outdir,'spectra.dat')):
+                dst = os.path.join(outdir,f'spectra_k3_{T_K}K.dat')
+                shutil.move(os.path.join(outdir,'spectra.dat'), dst)
+                bands_files[T_K] = dst
+
+    if HAS_MATPLOTLIB and bands_files:
+        n_p = len(target_T); fig, axes = plt.subplots(1, n_p, figsize=(4*n_p, 5), sharey=True)
+        if n_p == 1: axes = [axes]
+        for ax, T_K in zip(axes, target_T):
+            if T_K in bands_files:
+                plot_bands(bands_files[T_K], title=f"T={T_K}K", ax=ax)
+        plt.suptitle("Bands vs T: 3-site kagome + f")
+        plt.tight_layout()
+        plt.savefig(os.path.join(outdir, 'fig_k3_bands_vs_T.png'), dpi=150)
+        plt.close()
+        print("      Saved fig_k3_bands_vs_T.png")
+
+    passed = (rc == 0 and J_opt is not None and len(temps_K) > 5 and len(hr_files) >= 5)
+    details = f"rc={rc}, J_opt={J_opt}, S_mag={S_mag}, L2={L2}, T_pts={len(temps_K)}, HR={len(hr_files)}"
+    print(f"\n  {'PASS' if passed else 'FAIL'}: {details}")
+    return {'test': 'kagome3_pipeline', 'passed': passed,
+            'J_opt': J_opt, 'S_mag': S_mag, 'L2_best': L2, 'details': details}
+
+
+# ============================================================
 # Test report
 # ============================================================
 
@@ -1174,7 +1448,7 @@ def generate_test_report(outdir, test_results):
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    outdir = os.path.join(script_dir, 'kagome_test_output')
+    outdir = os.path.join(script_dir, 'test_tsf0.5_output')
     os.makedirs(outdir, exist_ok=True)
     print(f"Output directory: {outdir}")
 
@@ -1195,7 +1469,7 @@ def main():
         test_results.append({'test': 'full_pipeline_e2e', 'passed': False, 'details': str(e)})
 
     # Test 7: 3D simple cubic
-    outdir_cubic = os.path.join(script_dir, 'cubic_test_output')
+    outdir_cubic = os.path.join(script_dir, 'test_tsf0.5_output', 'cubic')
     os.makedirs(outdir_cubic, exist_ok=True)
     try:
         r7 = test_cubic_pipeline(outdir_cubic, exe_wanneff, exe_wannband)
@@ -1207,7 +1481,7 @@ def main():
         test_results.append({'test': 'cubic_pipeline', 'passed': False, 'details': str(e)})
 
     # Test 8a: Kagome J_TENSOR
-    outdir_tensor_k = os.path.join(script_dir, 'kagome_tensor_output')
+    outdir_tensor_k = os.path.join(script_dir, 'test_tsf0.5_output', 'kagome_tensor')
     os.makedirs(outdir_tensor_k, exist_ok=True)
     try:
         r8a = test_tensor_pipeline(outdir_tensor_k, exe_wanneff, exe_wannband,
@@ -1220,7 +1494,7 @@ def main():
         test_results.append({'test': 'tensor_pipeline_kagome_tensor', 'passed': False, 'details': str(e)})
 
     # Test 8b: Cubic J_TENSOR
-    outdir_tensor_c = os.path.join(script_dir, 'cubic_tensor_output')
+    outdir_tensor_c = os.path.join(script_dir, 'test_tsf0.5_output', 'cubic_tensor')
     os.makedirs(outdir_tensor_c, exist_ok=True)
     try:
         r8b = test_tensor_pipeline(outdir_tensor_c, exe_wanneff, exe_wannband,
@@ -1231,6 +1505,16 @@ def main():
     except Exception as e:
         import traceback; traceback.print_exc()
         test_results.append({'test': 'tensor_pipeline_cubic_tensor', 'passed': False, 'details': str(e)})
+
+    # Test 9: 3-site kagome flat band + f-decoration
+    outdir_k3 = os.path.join(script_dir, 'test_tsf0.5_output', 'kagome3')
+    os.makedirs(outdir_k3, exist_ok=True)
+    try:
+        r9 = test_kagome3_pipeline(outdir_k3, exe_wanneff, exe_wannband)
+        test_results.append(r9)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        test_results.append({'test': 'kagome3_pipeline', 'passed': False, 'details': str(e)})
 
     print("\n" + "="*60 + "\nSUMMARY\n" + "="*60)
     n_pass = sum(1 for r in test_results if r.get('passed') is not None and r.get('passed'))
