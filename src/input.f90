@@ -58,7 +58,8 @@ MODULE input
   real(dp) :: mc_temperature(3) = (/0.0_dp, 0.5_dp, 300.0_dp/) ! T_start, T_step, T_end (eV)
   logical  :: mc_weiss_mean_field = .true.
   real(dp) :: J_mc = 0.0_dp
-  logical  :: J_TENSOR = .false.
+  logical  :: J_TENSOR = .false.  ! DEPRECATED: use eff_mode instead
+  integer  :: eff_mode = 1        ! 1=scalar, 2=J_TENSOR, 3=J_S_TENSOR
   real(dp) :: tol_Jeff = 1.0d-2
   integer  :: J_R_range(6) = (/0, 0, 0, 0, 0, 0/) ! Rx_min,Rx_max,Ry_min,Ry_max,Rz_min,Rz_max
                                                     ! All zeros = use same R-grid as seedbare hr
@@ -76,7 +77,7 @@ MODULE input
   !
   namelist /EFFJS/ seedbare, eff_js, eff_mc, mc_temperature, &
                    mc_weiss_mean_field, J_mc,                 &
-                   J_TENSOR, tol_Jeff, J_R_range,             &
+                   eff_mode, tol_Jeff, J_R_range,             &
                    bayes_niter, J_bounds, S_bounds, mc_supercell, &
                    sigma_broadening, berry_curvature_output, &
                    n_ff_orbital_indices, ff_orbital_indices

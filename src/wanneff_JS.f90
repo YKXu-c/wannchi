@@ -19,10 +19,11 @@
 !   Objective (eigenvalue L2 norm):
 !     L(J,S) = (1/N_k) sum_k ||sort(eig(H_bare(k)+H_JS(k))) - sort(eig(H_eff_CC(k)))||^2
 !
-!   Scalar mode (J_TENSOR=.false.): Bayesian optimize (J_0, u_x, u_y, u_z) -- 4 params
-!                                    with S = u / |u| in the objective
-!   Tensor mode (J_TENSOR=.true.):  Bayesian optimize (J(R_1),...,J(R_n), S_x, S_y, S_z)
-!                                    -- (n_jrpt+3) params
+!   eff_mode=1 (scalar): Bayesian optimize (J_0, S_x, S_y, S_z) -- 4 params
+!   eff_mode=2 (J_TENSOR): Bayesian optimize (J(R_1),...,J(R_n), S_x, S_y, S_z)
+!                          -- (n_jrpt+3) params where S is uniform
+!   eff_mode=3 (J_S_TENSOR): Bayesian optimize (J(R_1),...,J(R_n), S_x(R_1),...,S_z(R_n))
+!                          -- (4*n_jrpt) params where S varies per R
 !   After Bayesian: apply tol_Jeff (prune small J(R) to 0).
 !
 !   Outputs:
@@ -48,7 +49,7 @@ MODULE wanneff_js_mod
   TYPE(wannham), pointer :: g_ham_bare => null()
   real(dp), allocatable :: g_kvec(:,:)              ! (3, nkirr)
   real(dp), allocatable :: g_rvec_J(:,:)            ! (3, n_jrpt) R-vectors for J
-  logical :: g_J_TENSOR
+  integer :: g_eff_mode  ! 1=scalar, 2=J_TENSOR, 3=J_S_TENSOR
   !
 CONTAINS
   !
@@ -335,8 +336,9 @@ CONTAINS
     !
     ! Callback for bayesian_optimize: compute L2 eigenvalue mismatch.
     !
-    ! Scalar mode (g_n_jrpt == 0): params = (J_0, S_x, S_y, S_z)
-    ! Tensor mode: params = (J(R_1),...,J(R_n), S_x, S_y, S_z)
+    ! eff_mode=1 (scalar): params = (J_0, S_x, S_y, S_z)
+    ! eff_mode=2 (J_TENSOR): params = (J_R(1:n), S_x, S_y, S_z) -- (n+3) params
+    ! eff_mode=3 (J_S_TENSOR): params = (J_R(1:n), S_x(1:n), S_y(1:n), S_z(1:n)) -- (4*n) params
     !
     use linalgwrap, only : eigen
     !
@@ -347,19 +349,35 @@ CONTAINS
     integer :: ik, n_jrpt_local
     real(dp) :: J_0
     real(dp), dimension(3) :: Svec
+    real(dp), allocatable :: J_R(:), S_R(:,:)
     real(dp) :: sraw_norm
     complex(dp), allocatable :: hk_bare(:,:), hk_tmp1(:,:), hk_tmp2(:,:)
     real(dp),    allocatable :: eig_trial(:), eig_eff(:)
     !
     n_jrpt_local = g_n_jrpt
+    allocate(J_R(n_jrpt_local), S_R(3, n_jrpt_local))
     !
-    ! Unpack parameters
-    if (.not. g_J_TENSOR) then
-      J_0      = params(1)
+    ! Unpack parameters based on eff_mode
+    if (g_eff_mode == 1) then
+      ! Scalar mode: params(1:4) = (J_0, S_x, S_y, S_z)
+      J_0 = params(1)
       call normalize_spin_direction(params(2:4), Svec, sraw_norm)
+      J_R = 0.0_dp
+      S_R = 0.0_dp
+    else if (g_eff_mode == 2) then
+      ! J_TENSOR mode: params(1:n) = J_R, params(n+1:n+3) = S_vec (uniform)
+      J_0 = 0.0_dp
+      J_R(1:n_jrpt_local) = params(1:n_jrpt_local)
+      Svec(1:3) = params(n_jrpt_local+1:n_jrpt_local+3)
+      ! Expand uniform Svec to per-R S_R for add_js_coupling_tensor_kspace
+      S_R = spread(Svec, 2, n_jrpt_local)
     else
-      J_0      = 0.0_dp
-      Svec(1:3)= params(n_jrpt_local+1:n_jrpt_local+3)
+      ! J_S_TENSOR mode: params = (J_R, S_x(1:n), S_y(1:n), S_z(1:n))
+      J_0 = 0.0_dp
+      J_R(1:n_jrpt_local) = params(1:n_jrpt_local)
+      S_R(1, 1:n_jrpt_local) = params(n_jrpt_local+1:2*n_jrpt_local)
+      S_R(2, 1:n_jrpt_local) = params(2*n_jrpt_local+1:3*n_jrpt_local)
+      S_R(3, 1:n_jrpt_local) = params(3*n_jrpt_local+1:4*n_jrpt_local)
     endif
     !
     allocate(hk_bare(g_norb_bare, g_norb_bare))
@@ -376,11 +394,11 @@ CONTAINS
       call calc_hk(hk_bare, g_ham_bare, g_kvec(:, ik))
       hk_tmp1 = hk_bare
       !
-      if (.not. g_J_TENSOR) then
+      if (g_eff_mode == 1) then
         call add_js_coupling_kspace(hk_tmp1, g_norb_bare, J_0, Svec)
       else
-        call add_js_coupling_tensor_kspace(hk_tmp1, g_norb_bare, params(1:n_jrpt_local), &
-                                            Svec, n_jrpt_local, g_rvec_J, g_kvec(:,ik))
+        call add_js_coupling_tensor_kspace(hk_tmp1, g_norb_bare, J_R, S_R, &
+                                           n_jrpt_local, g_rvec_J, g_kvec(:,ik))
       endif
       !
       ! Eigenvalues of H_trial (heigen overwrites hk_tmp1 with eigenvectors)
@@ -398,7 +416,7 @@ CONTAINS
     !
     val = val / real(g_nkirr, dp)
     !
-    deallocate(hk_bare, hk_tmp1, hk_tmp2, eig_trial, eig_eff)
+    deallocate(hk_bare, hk_tmp1, hk_tmp2, eig_trial, eig_eff, J_R, S_R)
     !
   END SUBROUTINE js_objective
   !
@@ -430,35 +448,44 @@ CONTAINS
   END SUBROUTINE add_js_coupling_kspace
   !
   ! ---------------------------------------------------------------------------
-  SUBROUTINE add_js_coupling_tensor_kspace(hk, norb, jeff_R, Svec, n_jrpt, rvec_J, kvec)
+  SUBROUTINE add_js_coupling_tensor_kspace(hk, norb, jeff_R, S_R, n_jrpt, rvec_J, kvec)
     !
-    ! Add tensor JS coupling: sum_R J(R)*exp(ik.R) * (S.sigma)/2
+    ! Add tensor JS coupling: sum_R J(R)*exp(ik.R) * (S(R).sigma)/2
+    ! S_R(3, n_jrpt) contains the S vector for each R
+    ! For mode 2 (J_TENSOR): S_R is uniform (all columns identical)
+    ! For mode 3 (J_S_TENSOR): S_R varies per R
     !
     use constants, only : twopi
     !
     complex(dp), dimension(norb, norb), intent(inout) :: hk
     integer,  intent(in) :: norb, n_jrpt
     real(dp), dimension(n_jrpt), intent(in) :: jeff_R
-    real(dp), dimension(3), intent(in) :: Svec, kvec
+    real(dp), dimension(3, n_jrpt), intent(in) :: S_R
     real(dp), dimension(3, n_jrpt), intent(in) :: rvec_J
+    real(dp), dimension(3), intent(in) :: kvec
     !
     integer :: ir, io, n_c
-    real(dp) :: rdotk, Jk_re, Jk_im
-    complex(dp) :: Jk
+    real(dp) :: rdotk
+    complex(dp) :: Jk_R, Jsz_R, Jsp_R, Jsm_R
     complex(dp) :: Jsz, Jsp, Jsm
     !
     n_c = norb / 2
     !
-    ! Compute J(k) = sum_R J(R) * exp(i*2pi*k.R)
-    Jk = cmplx_0
+    ! For each R, compute J(R) * exp(ik.R) * (S(R).sigma)/2 and sum
+    Jsz = cmplx_0
+    Jsp = cmplx_0
+    Jsm = cmplx_0
     do ir = 1, n_jrpt
       rdotk = sum(kvec(:) * rvec_J(:, ir)) * twopi
-      Jk = Jk + jeff_R(ir) * cmplx(cos(rdotk), sin(rdotk), KIND=dp)
+      Jk_R = jeff_R(ir) * cmplx(cos(rdotk), sin(rdotk), KIND=dp)
+      ! S(R) . sigma / 2 components
+      Jsz_R = Jk_R * cmplx(S_R(3, ir) / 2.0_dp, 0.0_dp, KIND=dp)
+      Jsp_R = Jk_R * cmplx(S_R(1, ir) / 2.0_dp, -S_R(2, ir) / 2.0_dp, KIND=dp)
+      Jsm_R = Jk_R * cmplx(S_R(1, ir) / 2.0_dp,  S_R(2, ir) / 2.0_dp, KIND=dp)
+      Jsz = Jsz + Jsz_R
+      Jsp = Jsp + Jsp_R
+      Jsm = Jsm + Jsm_R
     enddo
-    !
-    Jsz = Jk * cmplx(Svec(3) / 2.0_dp, 0.0_dp, KIND=dp)
-    Jsp = Jk * cmplx(Svec(1) / 2.0_dp, -Svec(2) / 2.0_dp, KIND=dp)
-    Jsm = Jk * cmplx(Svec(1) / 2.0_dp,  Svec(2) / 2.0_dp, KIND=dp)
     !
     do io = 1, n_c
       hk(io,     io)     = hk(io,     io)     + Jsz
@@ -499,7 +526,7 @@ PROGRAM WannEffJS
   use input,           only : read_input, read_effjs_input, finalize_input, &
                                mu, seed, seedbare, eff_js, eff_mc, &
                                mc_temperature, mc_weiss_mean_field, J_mc, &
-                               J_TENSOR, tol_Jeff, J_R_range, bayes_niter, &
+                               eff_mode, tol_Jeff, J_R_range, bayes_niter, &
                                J_bounds, S_bounds, mc_supercell, sigma_broadening, &
                                berry_curvature_output, &
                                ff_orbital_indices, n_ff_orbital_indices, &
@@ -533,6 +560,7 @@ PROGRAM WannEffJS
   real(dp), dimension(3) :: Svec_opt
   real(dp) :: J_opt, S_mag_opt, J_mc_used, L2_best
   real(dp), allocatable :: jeff_R(:)
+  real(dp), allocatable :: S_R_opt(:,:)  ! S vectors for each R (mode 3)
   !
   real(dp), allocatable :: mvec_vs_T(:,:)
   integer :: n_temps, iT
@@ -566,7 +594,7 @@ PROGRAM WannEffJS
     write(stdout, '(A,A)') "  seedbare = ", trim(seedbare)
     write(stdout, '(A,L)') "  eff_js   = ", eff_js
     write(stdout, '(A,L)') "  eff_mc   = ", eff_mc
-    write(stdout, '(A,L)') "  J_TENSOR = ", J_TENSOR
+    write(stdout, '(A,I6)') "  eff_mode = ", eff_mode
   endif
   !
   ! ---- Read seed (full system) into GLOBAL ham (lattice module variable) ----
@@ -675,7 +703,7 @@ PROGRAM WannEffJS
   endif
   !
   ! ---- Set up J(R) R-grid (tensor mode) ----
-  if (J_TENSOR) then
+  if (eff_mode > 1) then
     if (all(J_R_range == 0)) then
       ! Use same R-grid as ham_bare
       n_jrpt = ham_bare%nrpt
@@ -692,7 +720,11 @@ PROGRAM WannEffJS
       ! wt_J weights already set by find_ws
     endif
     if (inode .eq. 0) then
-      write(stdout, '(A,1I5,A)') "  J_TENSOR: n_jrpt = ", n_jrpt, " R-vectors for J"
+      if (eff_mode == 2) then
+        write(stdout, '(A,1I5,A)') "  J_TENSOR: n_jrpt = ", n_jrpt, " R-vectors for J"
+      else
+        write(stdout, '(A,1I5,A)') "  J_S_TENSOR: n_jrpt = ", n_jrpt, " R-vectors for J"
+      endif
     endif
   else
     n_jrpt = 0
@@ -748,11 +780,11 @@ PROGRAM WannEffJS
   g_norb_cc   = norb_cc
   g_nkirr     = nkirr
   g_n_jrpt    = n_jrpt
-  g_J_TENSOR  = J_TENSOR
+  g_eff_mode  = eff_mode
   g_ham_bare  => ham_bare
   allocate(g_kvec(3, nkirr))
   g_kvec = kvec(:, 1:nkirr)
-  if (J_TENSOR .and. n_jrpt > 0) then
+  if (eff_mode > 1 .and. n_jrpt > 0) then
     allocate(g_rvec_J(3, n_jrpt))
     g_rvec_J = rvec_J
   endif
@@ -761,7 +793,7 @@ PROGRAM WannEffJS
   if (eff_js .and. inode .eq. 0) then
     CALL log_start('bayesian_optimize')
     !
-    if (.not. J_TENSOR) then
+    if (eff_mode == 1) then
       ! Scalar mode: 4 parameters (J_0, S_x, S_y, S_z)
       allocate(bounds_bayes(2, 4), params_opt(4))
       bounds_bayes(1, 1) = J_bounds(1)
@@ -780,15 +812,15 @@ PROGRAM WannEffJS
         S_mag_opt = 0.0_dp
       endif
       !
-    else
-      ! Tensor mode: (n_jrpt + 3) parameters
+    else if (eff_mode == 2) then
+      ! J_TENSOR mode: (n_jrpt + 3) parameters
       allocate(bounds_bayes(2, n_jrpt+3), params_opt(n_jrpt+3))
       bounds_bayes(1, 1:n_jrpt) = J_bounds(1)
       bounds_bayes(2, 1:n_jrpt) = J_bounds(2)
       bounds_bayes(1, n_jrpt+1:n_jrpt+3) = S_bounds(1)
       bounds_bayes(2, n_jrpt+1:n_jrpt+3) = S_bounds(2)
       !
-      write(stdout, '(A,1I5,A)') "  Bayesian optimization: tensor J (", n_jrpt+3, " params)"
+      write(stdout, '(A,1I5,A)') "  Bayesian optimization: J_TENSOR (", n_jrpt+3, " params)"
       CALL bayesian_optimize(js_objective_callback, bounds_bayes, n_jrpt+3, params_opt, bayes_niter)
       !
       allocate(jeff_R(n_jrpt))
@@ -807,14 +839,65 @@ PROGRAM WannEffJS
       write(stdout, '(A,1I5,A,1I5,A)') "  tol_Jeff pruning: ", n_pruned, " of ", &
             n_jrpt, " J(R) set to zero"
       !
+    else
+      ! J_S_TENSOR mode: (4 * n_jrpt) parameters
+      ! params = (J_R(1:n), S_x(1:n), S_y(1:n), S_z(1:n))
+      allocate(bounds_bayes(2, 4*n_jrpt), params_opt(4*n_jrpt))
+      bounds_bayes(1, 1:n_jrpt) = J_bounds(1)
+      bounds_bayes(2, 1:n_jrpt) = J_bounds(2)
+      ! S components per R
+      bounds_bayes(1, n_jrpt+1:4*n_jrpt) = S_bounds(1)
+      bounds_bayes(2, n_jrpt+1:4*n_jrpt) = S_bounds(2)
+      !
+      write(stdout, '(A,1I5,A)') "  Bayesian optimization: J_S_TENSOR (", 4*n_jrpt, " params)"
+      CALL bayesian_optimize(js_objective_callback, bounds_bayes, 4*n_jrpt, params_opt, bayes_niter)
+      !
+      allocate(jeff_R(n_jrpt), S_R_opt(3, n_jrpt))
+      jeff_R   = params_opt(1:n_jrpt)
+      S_R_opt(1, 1:n_jrpt) = params_opt(n_jrpt+1:2*n_jrpt)
+      S_R_opt(2, 1:n_jrpt) = params_opt(2*n_jrpt+1:3*n_jrpt)
+      S_R_opt(3, 1:n_jrpt) = params_opt(3*n_jrpt+1:4*n_jrpt)
+      Svec_opt = sum(S_R_opt, dim=2) / real(n_jrpt, dp)  ! average S for output
+      J_opt    = 1.0_dp
+      !
+      ! Apply tol_Jeff pruning
+      n_pruned = 0
+      do ii = 1, n_jrpt
+        if (abs(jeff_R(ii)) < tol_Jeff) then
+          jeff_R(ii) = 0.0_dp
+          n_pruned = n_pruned + 1
+        endif
+      enddo
+      write(stdout, '(A,1I5,A,1I5,A)') "  tol_Jeff pruning: ", n_pruned, " of ", &
+            n_jrpt, " J(R) set to zero"
+      !
     endif
     !
-    if (J_TENSOR) S_mag_opt = sqrt(sum(Svec_opt**2))
+    if (eff_mode == 2) then
+      S_mag_opt = sqrt(sum(Svec_opt**2))
+    else if (eff_mode == 3) then
+      S_mag_opt = sqrt(sum(Svec_opt**2))  ! representative magnitude
+    endif
     L2_best   = js_objective_callback(params_opt, size(params_opt))
     write(stdout, '(A,1F10.5)') "  J_opt   = ", J_opt
     write(stdout, '(A,3F10.5)') "  Svec_opt= ", Svec_opt
     write(stdout, '(A,1F10.5)') "  |S|_opt = ", S_mag_opt
     write(stdout, '(A,1G12.4)') "  L2_best = ", L2_best
+    if (eff_mode > 1) then
+      write(stdout, '(A,I6)') "  n_jrpt  = ", n_jrpt
+      if (eff_mode == 2) then
+        CALL log_msg('J_TENSOR: J(R) values (R1,R2,R3,J_R)')
+        do ii = 1, n_jrpt
+          write(stdout, '(A,3I5,F12.6)') '  J_R: ', nint(rvec_J(:,ii)), jeff_R(ii)
+        enddo
+      else
+        CALL log_msg('J_S_TENSOR: J(R) and S(R) values')
+        do ii = 1, n_jrpt
+          write(stdout, '(A,3I5,F12.6,3F12.6)') '  J_S_R: ', &
+            nint(rvec_J(:,ii)), jeff_R(ii), S_R_opt(:,ii)
+        enddo
+      endif
+    endif
     CALL log_msg('Bayesian optimization done. Check L2_best in seed_JS.output')
     !
     ! ---- Write seed_JS.output ----
@@ -823,11 +906,11 @@ PROGRAM WannEffJS
     write(99, '(A)')        '# wanneff_JS output'
     write(99, '(A,A)')      '# seed     = ', trim(seed)
     write(99, '(A,A)')      '# seedbare = ', trim(seedbare)
-    write(99, '(A,L1)')     '# J_TENSOR = ', J_TENSOR
+    write(99, '(A,I6)')     '# eff_mode = ', eff_mode
     write(99, '(A,I6)')     '# bayes_niter = ', bayes_niter
     write(99, '(A,ES10.4)') '# tol_Jeff    = ', tol_Jeff
     write(99, '(A)')        ''
-    if (.not. J_TENSOR) then
+    if (eff_mode == 1) then
       write(99, '(A,F12.6)')  'J_opt  ', J_opt
     endif
     write(99, '(A,F12.6)')  'S_x    ', Svec_opt(1)
@@ -835,13 +918,20 @@ PROGRAM WannEffJS
     write(99, '(A,F12.6)')  'S_z    ', Svec_opt(3)
     write(99, '(A,F12.6)')  'S_mag  ', S_mag_opt
     write(99, '(A,G12.4)')  'L2_best', L2_best
-    if (J_TENSOR .and. n_jrpt > 0) then
+    if (eff_mode > 1 .and. n_jrpt > 0) then
       write(99, '(A,I6)')   'n_jrpt ', n_jrpt
       write(99, '(A)')      ''
-      write(99, '(A)')      '# R1   R2   R3        J(R)'
-      do ii = 1, n_jrpt
-        write(99, '(3I5,F14.8)') nint(rvec_J(:,ii)), jeff_R(ii)
-      enddo
+      if (eff_mode == 2) then
+        write(99, '(A)')      '# R1   R2   R3        J(R)'
+        do ii = 1, n_jrpt
+          write(99, '(3I5,F14.8)') nint(rvec_J(:,ii)), jeff_R(ii)
+        enddo
+      else
+        write(99, '(A)')      '# R1   R2   R3        J(R)       S_x(R)      S_y(R)      S_z(R)'
+        do ii = 1, n_jrpt
+          write(99, '(3I5,F14.8,3F14.8)') nint(rvec_J(:,ii)), jeff_R(ii), S_R_opt(:,ii)
+        enddo
+      endif
     endif
     close(99)
     write(stdout, '(A,A)')  '  JS output written: ', trim(fname_out)
@@ -865,17 +955,29 @@ PROGRAM WannEffJS
     ham_out%rvec   = ham_bare%rvec
     ham_out%tau    = ham_bare%tau
     !
-    if (.not. J_TENSOR) then
+    if (eff_mode == 1) then
       ! Scalar: add at R=0 only
       CALL add_js_coupling(ham_out, norb_bare, J_opt, Svec_opt, ham_out%r000)
-    else
-      ! Tensor: add at each R-point (J_R_range grid)
+    else if (eff_mode == 2) then
+      ! J_TENSOR: add at each R-point with uniform Svec
       do ii = 1, n_jrpt
         if (abs(jeff_R(ii)) < eps6) cycle
         ! Find the corresponding R-point in ham_out
         do jj = 1, ham_out%nrpt
           if (all(abs(ham_out%rvec(:,jj) - rvec_J(:,ii)) < 0.5_dp)) then
             CALL add_js_coupling(ham_out, norb_bare, jeff_R(ii), Svec_opt, jj)
+            exit
+          endif
+        enddo
+      enddo
+    else
+      ! J_S_TENSOR: add at each R-point with per-R S vector
+      do ii = 1, n_jrpt
+        if (abs(jeff_R(ii)) < eps6) cycle
+        ! Find the corresponding R-point in ham_out
+        do jj = 1, ham_out%nrpt
+          if (all(abs(ham_out%rvec(:,jj) - rvec_J(:,ii)) < 0.5_dp)) then
+            CALL add_js_coupling(ham_out, norb_bare, jeff_R(ii), S_R_opt(:,ii), jj)
             exit
           endif
         enddo
@@ -991,14 +1093,26 @@ PROGRAM WannEffJS
       ! Reconstruct ham_out with temperature-dependent S
       ham_out%hr = ham_bare%hr
       !
-      if (.not. J_TENSOR) then
+      if (eff_mode == 1) then
         CALL add_js_coupling(ham_out, norb_bare, J_opt, S_eff_vec, ham_out%r000)
-      else
+      else if (eff_mode == 2) then
         do ii = 1, n_jrpt
           if (abs(jeff_R(ii)) < eps6) cycle
           do jj = 1, ham_out%nrpt
             if (all(abs(ham_out%rvec(:,jj) - rvec_J(:,ii)) < 0.5_dp)) then
               CALL add_js_coupling(ham_out, norb_bare, jeff_R(ii), S_eff_vec, jj)
+              exit
+            endif
+          enddo
+        enddo
+      else
+        ! J_S_TENSOR: use per-R S vectors (not yet scaled by MC)
+        ! For now, skip or use uniform S_eff_vec scaled by average
+        do ii = 1, n_jrpt
+          if (abs(jeff_R(ii)) < eps6) cycle
+          do jj = 1, ham_out%nrpt
+            if (all(abs(ham_out%rvec(:,jj) - rvec_J(:,ii)) < 0.5_dp)) then
+              CALL add_js_coupling(ham_out, norb_bare, jeff_R(ii), S_R_opt(:,ii), jj)
               exit
             endif
           enddo

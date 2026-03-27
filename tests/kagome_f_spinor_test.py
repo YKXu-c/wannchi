@@ -274,7 +274,7 @@ def write_qpoints_bandpath(fname, n_per_seg=100):
 def write_wanneff_inp(fname, seed='seed', seedbare='seedbare',
                       eff_js=True, eff_mc=True,
                       mc_temperature=(0.0, 0.000172, 0.01724),
-                      J_TENSOR=False, J_R_range=(0,0,0,0,0,0),
+                      eff_mode=1, J_R_range=(0,0,0,0,0,0),
                       mu=0.0, nnu=300, emin=-4.0, emax=4.0,
                       bayes_niter=100, berry_curvature_output=False,
                       ff_orbital_indices=None):
@@ -290,7 +290,7 @@ def write_wanneff_inp(fname, seed='seed', seedbare='seedbare',
         f.write(f"  eff_js={'.true.' if eff_js else '.false.'},\n")
         f.write(f"  eff_mc={'.true.' if eff_mc else '.false.'},\n")
         f.write(f"  mc_temperature={mc_str},\n")
-        f.write(f"  J_TENSOR={'.true.' if J_TENSOR else '.false.'},\n")
+        f.write(f"  eff_mode={eff_mode},\n")
         f.write(f"  J_R_range={jr_str},\n")
         f.write(f"  bayes_niter={bayes_niter},\n")
         f.write(f"  J_bounds=0.0 5.0,\n")
@@ -475,7 +475,7 @@ def test_full_pipeline_e2e(outdir, exe_wanneff=None, exe_wannband=None):
         seed='seed', seedbare='seedbare',
         eff_js=True, eff_mc=True,
         mc_temperature=(0.0, 0.000172, 0.01724),  # eV, 0 to ~200K
-        J_TENSOR=False,
+        eff_mode=1,  # scalar J mode
         bayes_niter=100,
         ff_orbital_indices=[5, 10]  # f_up, f_dn in kagome seed
     )
@@ -777,7 +777,7 @@ def generate_cubic_test_data(outdir):
         seed='seed', seedbare='seedbare',
         eff_js=True, eff_mc=True,
         mc_temperature=(0.0, 0.00026, 0.026),  # ~0 to 300K, step ~3K
-        J_TENSOR=False, bayes_niter=100,
+        eff_mode=1, bayes_niter=100,
         ff_orbital_indices=[3, 6]  # f2_up, f2_dn in cubic seed
     )
     print(f"  Files written to {outdir}/")
@@ -1002,7 +1002,7 @@ def test_tensor_pipeline(outdir, exe_wanneff=None, exe_wannband=None,
         seed='seed', seedbare='seedbare',
         eff_js=True, eff_mc=True,
         mc_temperature=mc_temp,
-        J_TENSOR=True,
+        eff_mode=2,  # J_TENSOR mode
         J_R_range=(-1, 1, -1, 1, -1, 1),
         bayes_niter=100,
         emin=emin, emax=emax,
@@ -1144,6 +1144,200 @@ def test_tensor_pipeline(outdir, exe_wanneff=None, exe_wannband=None,
 
 
 # ============================================================
+# Test 10: J_S_TENSOR pipeline (generic for kagome and cubic)
+# ============================================================
+
+def test_js_tensor_pipeline(outdir, exe_wanneff=None, exe_wannband=None,
+                            label='js_tensor', generate_fn=None,
+                            temps=None, emin=-6.0, emax=6.0):
+    """
+    Test 10 (a,b,c): Full pipeline with eff_mode=3 (J_S_TENSOR).
+    J and S both vary with R: params = (J_R, S_x(R), S_y(R), S_z(R))
+    generate_fn: either generate_test_data or generate_cubic_test_data
+    label: short label for figure naming
+    temps: list of target temperatures in K for band plots
+    """
+    if temps is None:
+        temps = [0, 10, 30, 90, 200]
+    print("\n" + "="*60)
+    print(f"TEST 10 ({label}): J_S_TENSOR pipeline (Fortran)")
+    print("="*60)
+
+    if exe_wanneff is None:
+        print("  wanneff_js.x not found, skipping")
+        return {'test': f'js_tensor_pipeline_{label}', 'passed': None,
+                'details': 'wanneff_js.x not found'}
+
+    # Step 1: Generate test data
+    print(f"\n  [1] Generating {label} test data...")
+    generate_fn(outdir)
+
+    # Determine mc_temperature based on label
+    if 'cubic' in label:
+        mc_temp = (0.0, 0.00026, 0.026)  # 0-300K
+    else:
+        mc_temp = (0.0, 0.000172, 0.01724)  # 0-200K
+
+    # Step 2: Write wanneff.inp with eff_mode=3 (J_S_TENSOR)
+    print(f"  [2] Writing wanneff.inp (eff_mode=3, J_S_TENSOR, J_R_range=±1)...")
+    # Determine FF indices based on label
+    if 'cubic' in label:
+        ff_indices = [3, 6]  # cubic: f2_up, f2_dn
+    elif 'k3' in label or 'kagome3' in label:
+        ff_indices = [4, 8]  # kagome3: f2_up, f2_dn
+    else:
+        ff_indices = [5, 10]  # kagome: f_up, f_dn
+    write_wanneff_inp(
+        os.path.join(outdir, 'wanneff.inp'),
+        seed='seed', seedbare='seedbare',
+        eff_js=True, eff_mc=True,
+        mc_temperature=mc_temp,
+        eff_mode=3,  # J_S_TENSOR mode
+        J_R_range=(-1, 1, -1, 1, -1, 1),
+        bayes_niter=100,
+        emin=emin, emax=emax,
+        ff_orbital_indices=ff_indices
+    )
+
+    # Step 3: Run wanneff_js.x
+    print(f"  [3] Running wanneff_js.x (J_S_TENSOR mode, may be slower)...")
+    try:
+        rc, out, err = run_executable(exe_wanneff, workdir=outdir, timeout=900)
+    except subprocess.TimeoutExpired:
+        return {'test': f'js_tensor_pipeline_{label}', 'passed': False,
+                'details': 'wanneff_js.x timeout (900s)'}
+    print(f"      Return code: {rc}")
+    if rc != 0:
+        print(f"      FAILED. stderr:\n{err[:1000]}")
+        return {'test': f'js_tensor_pipeline_{label}', 'passed': False,
+                'details': f'rc={rc}: {err[:300]}'}
+
+    # Step 4: Parse outputs
+    print("  [4] Parsing seed_JS.output...")
+    js_out = parse_js_output(os.path.join(outdir, 'seed_JS.output'))
+    J_opt = js_out.get('J_opt')  # scalar summary (may be 1.0 for tensor mode)
+    S_mag = js_out.get('S_mag')
+    n_jrpt = js_out.get('n_jrpt')
+    print(f"      S_mag={S_mag}, n_jrpt={n_jrpt}")
+    # Print J and S vectors per R if available
+    if 'S_R' in js_out or 'J_R' in js_out:
+        print(f"      J_R: {js_out.get('J_R', 'N/A')}")
+        print(f"      S_R: {js_out.get('S_R', 'N/A')}")
+
+    # Step 5: Parse transport
+    print("  [5] Parsing seed_transport_vs_T.dat...")
+    temps_K, sigma_xy, sigma_xx = parse_transport_vs_T(
+        os.path.join(outdir, 'seed_transport_vs_T.dat'))
+    print(f"      Transport data points: {len(temps_K)}")
+
+    # Step 6: Discover HR files
+    hr_files = sorted(glob.glob(os.path.join(outdir, 'seedbare_hr_*K_hr.dat')))
+    print(f"  [6] Found {len(hr_files)} temperature HR files")
+
+    # Step 6b: Band comparison — 4 panels: seed, seed_downfold, seedbare, seedbare+JS
+    print(f"  [6b] Band comparison: seed / seed_downfold / seedbare / seedbare+JS ({label})...")
+    if exe_wannband:
+        for src_seed, spec_label, pos_src in [
+            ('seed',           f'{label}_full',      'seed.pos'),
+            ('seed_downfold',  f'{label}_downfold', 'seedbare.pos'),
+            ('seedbare',       f'{label}_bare',     'seedbare.pos'),
+            ('seedbare_hr_0K', f'{label}_effective','seedbare.pos'),
+        ]:
+            pos_dst = os.path.join(outdir, f'{src_seed}.pos')
+            if not os.path.exists(pos_dst):
+                shutil.copy(os.path.join(outdir, pos_src), pos_dst)
+            with open(os.path.join(outdir, 'wannband.inp'), 'w') as f:
+                f.write(f"&SYSTEM\n  seed='{src_seed}', mu=0.0, spectra_calc=.true.\n/\n")
+                f.write(f"&CONTROL\n  nnu=200, emin={emin}, emax={emax}, eps=1e-3\n/\n")
+            rc_b, _, _ = run_executable(exe_wannband, workdir=outdir, timeout=180)
+            spec_out = os.path.join(outdir, f'spectra_{spec_label}.dat')
+            if rc_b == 0 and os.path.exists(os.path.join(outdir, 'spectra.dat')):
+                shutil.move(os.path.join(outdir, 'spectra.dat'), spec_out)
+                print(f"      {src_seed}: bands OK -> spectra_{spec_label}.dat")
+            else:
+                print(f"      {src_seed}: wannband.x failed (rc={rc_b})")
+        if HAS_MATPLOTLIB:
+            fig_cmp, axes_cmp = plt.subplots(1, 4, figsize=(24, 5), sharey=True)
+            plot_bands(os.path.join(outdir, f'spectra_{label}_full.dat'),
+                       title="seed (full, with f)", ax=axes_cmp[0])
+            plot_bands(os.path.join(outdir, f'spectra_{label}_downfold.dat'),
+                       title="seed_downfold (H_CC)", ax=axes_cmp[1])
+            plot_bands(os.path.join(outdir, f'spectra_{label}_bare.dat'),
+                       title="seedbare (bare, no f)", ax=axes_cmp[2])
+            eff_title = f"bare+J·S (J_S_TENSOR, S={S_mag:.2f})"
+            plot_bands(os.path.join(outdir, f'spectra_{label}_effective.dat'),
+                       title=eff_title, ax=axes_cmp[3])
+            plt.suptitle(f"Band comparison: J_S_TENSOR ({label})")
+            plt.tight_layout()
+            plt.savefig(os.path.join(outdir, f'fig_{label}_band_comparison.png'), dpi=150)
+            plt.close()
+            print(f"      Saved fig_{label}_band_comparison.png")
+
+    # Step 7: Plot transport
+    print("  [7] Plotting transport vs T...")
+    if HAS_MATPLOTLIB and len(temps_K) > 1:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        ax1.plot(temps_K, sigma_xy, 'b-o', ms=2, lw=1.0)
+        ax1.set_xlabel("T (K)"); ax1.set_ylabel(r"$\sigma_{xy}$ ($e^2/h$)")
+        ax1.set_title("Hall (AHC)"); ax1.axhline(0, color='gray', lw=0.5, ls='--')
+        ax2.plot(temps_K, sigma_xx, 'r-o', ms=2, lw=1.0)
+        ax2.set_xlabel("T (K)"); ax2.set_ylabel(r"$\sigma_{xx}$ ($e^2/h$)")
+        ax2.set_title("Longitudinal (Drude+Kubo)"); ax2.axhline(0, color='gray', lw=0.5, ls='--')
+        plt.suptitle(f"Transport vs T: J_S_TENSOR ({label})")
+        plt.tight_layout()
+        plt.savefig(os.path.join(outdir, f'fig_{label}_transport_vs_T.png'), dpi=150)
+        plt.close()
+        print(f"      Saved fig_{label}_transport_vs_T.png")
+
+    # Step 8: Band plots at selected T
+    bands_files = {}
+    if exe_wannband:
+        print(f"  [8] Running wannband.x at T = {temps} K...")
+        for T_K in temps:
+            avail_T = []
+            for f in hr_files:
+                try:
+                    t_str = os.path.basename(f).replace('seedbare_hr_','').replace('K_hr.dat','')
+                    avail_T.append((abs(int(t_str)-T_K), int(t_str), f))
+                except: pass
+            if not avail_T: continue
+            avail_T.sort()
+            _, T_actual, _ = avail_T[0]
+            seed_name = f'seedbare_hr_{T_actual}K'
+            shutil.copy(os.path.join(outdir,'seedbare.pos'), os.path.join(outdir,f'{seed_name}.pos'))
+            with open(os.path.join(outdir,'wannband.inp'),'w') as f:
+                f.write(f"&SYSTEM\n  seed='{seed_name}', mu=0.0, spectra_calc=.true.\n/\n")
+                f.write(f"&CONTROL\n  nnu=200, emin={emin}, emax={emax}, eps=1e-3\n/\n")
+            rc2, _, _ = run_executable(exe_wannband, workdir=outdir, timeout=120)
+            if rc2 == 0 and os.path.exists(os.path.join(outdir,'spectra.dat')):
+                dst = os.path.join(outdir,f'spectra_{label}_{T_K}K.dat')
+                shutil.move(os.path.join(outdir,'spectra.dat'), dst)
+                bands_files[T_K] = dst
+                print(f"      T={T_K}K: OK")
+
+    if HAS_MATPLOTLIB and bands_files:
+        n_p = len(temps)
+        fig, axes = plt.subplots(1, n_p, figsize=(4*n_p, 5), sharey=True)
+        if n_p == 1: axes = [axes]
+        for ax, T_K in zip(axes, temps):
+            if T_K in bands_files:
+                plot_bands(bands_files[T_K], title=f"T={T_K}K", ax=ax)
+            else:
+                ax.text(0.5, 0.5, f"no data", ha='center', va='center', transform=ax.transAxes)
+        plt.suptitle(f"Bands vs T: J_S_TENSOR ({label})")
+        plt.tight_layout()
+        plt.savefig(os.path.join(outdir, f'fig_{label}_bands_vs_T.png'), dpi=150)
+        plt.close()
+        print(f"      Saved fig_{label}_bands_vs_T.png")
+
+    passed = (rc == 0 and S_mag is not None and len(temps_K) > 5 and len(hr_files) >= 5)
+    details = f"rc={rc}, S_mag={S_mag}, n_jrpt={n_jrpt}, T_points={len(temps_K)}, HR={len(hr_files)}"
+    print(f"\n  {'PASS' if passed else 'FAIL'}: {details}")
+    return {'test': f'js_tensor_pipeline_{label}', 'passed': passed,
+            'S_mag': S_mag, 'n_jrpt': n_jrpt, 'details': details}
+
+
+# ============================================================
 # Test 9: 3-site kagome lattice (proper flat band + f-decoration)
 # ============================================================
 
@@ -1243,7 +1437,7 @@ def generate_kagome3_test_data(outdir):
         seed='seed', seedbare='seedbare',
         eff_js=True, eff_mc=True,
         mc_temperature=(0.0, 0.000172, 0.01724),
-        J_TENSOR=False, bayes_niter=100,
+        eff_mode=1, bayes_niter=100,
         ff_orbital_indices=[4, 8]  # f2_up, f2_dn in kagome3 seed
     )
     print(f"  Files written to {outdir}/")
@@ -1515,6 +1709,45 @@ def main():
     except Exception as e:
         import traceback; traceback.print_exc()
         test_results.append({'test': 'kagome3_pipeline', 'passed': False, 'details': str(e)})
+
+    # Test 10a: Kagome J_S_TENSOR
+    outdir_js_k = os.path.join(script_dir, 'test_tsf0.5_output', 'kagome_JStensor')
+    os.makedirs(outdir_js_k, exist_ok=True)
+    try:
+        r10a = test_js_tensor_pipeline(outdir_js_k, exe_wanneff, exe_wannband,
+                                       label='kagome_JStensor',
+                                       generate_fn=generate_test_data,
+                                       temps=[0, 10, 30, 90, 200])
+        test_results.append(r10a)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        test_results.append({'test': 'js_tensor_pipeline_kagome_JStensor', 'passed': False, 'details': str(e)})
+
+    # Test 10b: Cubic J_S_TENSOR
+    outdir_js_c = os.path.join(script_dir, 'test_tsf0.5_output', 'cubic_JStensor')
+    os.makedirs(outdir_js_c, exist_ok=True)
+    try:
+        r10b = test_js_tensor_pipeline(outdir_js_c, exe_wanneff, exe_wannband,
+                                       label='cubic_JStensor',
+                                       generate_fn=generate_cubic_test_data,
+                                       temps=[0, 30, 100, 200, 300])
+        test_results.append(r10b)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        test_results.append({'test': 'js_tensor_pipeline_cubic_JStensor', 'passed': False, 'details': str(e)})
+
+    # Test 10c: Kagome3 J_S_TENSOR
+    outdir_js_k3 = os.path.join(script_dir, 'test_tsf0.5_output', 'kagome3_JStensor')
+    os.makedirs(outdir_js_k3, exist_ok=True)
+    try:
+        r10c = test_js_tensor_pipeline(outdir_js_k3, exe_wanneff, exe_wannband,
+                                       label='kagome3_JStensor',
+                                       generate_fn=generate_kagome3_test_data,
+                                       temps=[0, 10, 30, 90, 200])
+        test_results.append(r10c)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        test_results.append({'test': 'js_tensor_pipeline_kagome3_JStensor', 'passed': False, 'details': str(e)})
 
     print("\n" + "="*60 + "\nSUMMARY\n" + "="*60)
     n_pass = sum(1 for r in test_results if r.get('passed') is not None and r.get('passed'))
