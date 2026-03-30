@@ -532,7 +532,8 @@ PROGRAM WannEffJS
                                ff_orbital_indices, n_ff_orbital_indices, &
                                read_qpoints, nqpt, qvec, &
                                emin, emax, nnu
-  use bayesian,        only : bayesian_optimize
+  use gp_bo,           only : bayesian_optimize
+  use cma_es,          only : cmaes_optimize
   use classical_mc,    only : classical_mc_run
   use transp_calc,     only : calc_sigma_xy, calc_sigma_xx, calc_berry_curvature_kmap
   use wannlog,         only : log_init, log_start, log_stop, log_msg, log_print_summary
@@ -820,8 +821,13 @@ PROGRAM WannEffJS
       bounds_bayes(1, n_jrpt+1:n_jrpt+3) = S_bounds(1)
       bounds_bayes(2, n_jrpt+1:n_jrpt+3) = S_bounds(2)
       !
-      write(stdout, '(A,1I5,A)') "  Bayesian optimization: J_TENSOR (", n_jrpt+3, " params)"
-      CALL bayesian_optimize(js_objective_callback, bounds_bayes, n_jrpt+3, params_opt, bayes_niter)
+      if (n_jrpt + 3 > 20) then
+        write(stdout, '(A,1I5,A)') "  CMA-ES optimization: J_TENSOR (", n_jrpt+3, " params)"
+        CALL cmaes_optimize(js_objective_callback, bounds_bayes, n_jrpt+3, params_opt, bayes_niter)
+      else
+        write(stdout, '(A,1I5,A)') "  Bayesian optimization: J_TENSOR (", n_jrpt+3, " params)"
+        CALL bayesian_optimize(js_objective_callback, bounds_bayes, n_jrpt+3, params_opt, bayes_niter)
+      endif
       !
       allocate(jeff_R(n_jrpt))
       jeff_R   = params_opt(1:n_jrpt)
@@ -849,8 +855,8 @@ PROGRAM WannEffJS
       bounds_bayes(1, n_jrpt+1:4*n_jrpt) = S_bounds(1)
       bounds_bayes(2, n_jrpt+1:4*n_jrpt) = S_bounds(2)
       !
-      write(stdout, '(A,1I5,A)') "  Bayesian optimization: J_S_TENSOR (", 4*n_jrpt, " params)"
-      CALL bayesian_optimize(js_objective_callback, bounds_bayes, 4*n_jrpt, params_opt, bayes_niter)
+      write(stdout, '(A,1I5,A)') "  CMA-ES optimization: J_S_TENSOR (", 4*n_jrpt, " params)"
+      CALL cmaes_optimize(js_objective_callback, bounds_bayes, 4*n_jrpt, params_opt, bayes_niter)
       !
       allocate(jeff_R(n_jrpt), S_R_opt(3, n_jrpt))
       jeff_R   = params_opt(1:n_jrpt)

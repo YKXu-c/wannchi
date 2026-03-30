@@ -1193,7 +1193,7 @@ def test_js_tensor_pipeline(outdir, exe_wanneff=None, exe_wannband=None,
         eff_js=True, eff_mc=True,
         mc_temperature=mc_temp,
         eff_mode=3,  # J_S_TENSOR mode
-        J_R_range=(-1, 1, -1, 1, -1, 1),
+        J_R_range=(0, 0, 0, 0, 0, 0),  # use full R-grid from ham_bare
         bayes_niter=100,
         emin=emin, emax=emax,
         ff_orbital_indices=ff_indices
