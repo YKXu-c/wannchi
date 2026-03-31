@@ -34,6 +34,10 @@
 !     - noise_var: 1e-4 (increased for eigenvalue-based objectives)
 !     - Length scale: re-optimized every 10 iterations for n_params > 10
 !
+!   MPI parallelization:
+!     Latin Hypercube init evaluations are distributed via distribute_calc.
+!     Works with para_serial.f90 (serial stub) on laptop builds.
+!
 !   References:
 !     - Mockus, Bayesian Approach to Global Optimization (1989)
 !     - Brochu, Cora, de Freitas, arXiv:1012.2599 (2010)
@@ -44,6 +48,7 @@ MODULE gp_bo
   !
   use constants, only : dp, twopi
   use linalgwrap, only : invmat
+  use para,       only : distribute_calc, first_idx, last_idx, para_merge_real, inode
   !
   implicit none
   !

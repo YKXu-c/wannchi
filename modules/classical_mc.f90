@@ -24,10 +24,17 @@
 !
 !   [Ref: Janke, Monte Carlo Simulations of Spin Systems, Springer (1996)]
 !   [Ref: Metropolis et al., J. Chem. Phys. 21, 1087 (1953)]
+!
+!   MPI parallelization:
+!     Temperature loop is distributed via distribute_calc(n_temps).
+!     Works with para_serial.f90 (serial stub) on laptop builds.
+!
 ! ===========================================================================
 MODULE classical_mc
   !
   use constants, only : dp
+  use para,      only : distribute_calc, first_idx, last_idx, para_merge_real, &
+                        inode, para_barrier
   !
   implicit none
   !
@@ -331,6 +338,8 @@ CONTAINS
     real(dp), dimension(3) :: mvec_tmp, mvec_acc
     real(dp) :: dist_nn, len_a1, len_a2, len_a3, len_min, u
     real(dp), dimension(3) :: r1_cart, r2_cart
+    real(dp), allocatable :: mvec_local(:,:)
+    integer :: n_local_temps, iT_start, iT_end
     !
     ! Determine supercell dimensions: user override or auto-detect from lattice
     len_a1 = sqrt(sum(avec(:,1)**2))
@@ -391,7 +400,17 @@ CONTAINS
           ", cutoff=", cutoff, " Ang"
     write(stdout, '(A,3I4,A)') "  # MC supercell: ", NX, NY, NZ, " (auto or user)"
     !
-    do iT = 1, n_temps
+    ! Distribute temperature points across MPI ranks
+    call distribute_calc(n_temps)
+    iT_start = first_idx
+    iT_end = last_idx
+    n_local_temps = last_idx - first_idx + 1
+    !
+    ! Allocate local result array
+    allocate(mvec_local(3, n_local_temps))
+    mvec_local = 0.0_dp
+    !
+    do iT = iT_start, iT_end
       !
       if (n_temps == 1) then
         T_now = T_start
@@ -404,7 +423,7 @@ CONTAINS
         do ii = 1, n_total_sites
           mc%spin(:, ii) = [0.0_dp, 0.0_dp, 1.0_dp]
         enddo
-        mvec_vs_T(:, iT) = [0.0_dp, 0.0_dp, 1.0_dp]
+        mvec_local(:, iT - iT_start + 1) = [0.0_dp, 0.0_dp, 1.0_dp]
         cycle
       endif
       !
@@ -420,16 +439,31 @@ CONTAINS
           mvec_acc = mvec_acc + mvec_tmp
         endif
       enddo
-      mvec_vs_T(:, iT) = mvec_acc / real(N_MEAS/MEAS_EVERY, dp)
+      mvec_local(:, iT - iT_start + 1) = mvec_acc / real(N_MEAS/MEAS_EVERY, dp)
       !
-      if (mod(iT, 20) == 1 .or. iT == n_temps) then
+      if (inode == 0 .and. (mod(iT, 20) == 1 .or. iT == n_temps)) then
         write(stdout, '(A,1F8.3,A,1F8.4)') &
               "    MC T=", T_now, " eV   |<S>|/S =", &
-              sqrt(sum(mvec_vs_T(:,iT)**2))
+              sqrt(sum(mvec_local(:,iT - iT_start + 1)**2))
       endif
       !
     enddo
     !
+    ! Gather results to all ranks via para_merge_real
+    call para_merge_real(mvec_local, 3 * n_local_temps)
+    !
+    ! Master (inode=0) copies local results to full array
+    if (inode == 0) then
+      do iT = 1, n_temps
+        mvec_vs_T(:, iT) = mvec_local(:, iT)
+      enddo
+    endif
+    call para_barrier()
+    !
+    ! Broadcast full result to all ranks
+    call para_merge_real(mvec_vs_T, 3 * n_temps)
+    !
+    deallocate(mvec_local)
     call mc_finalize(mc)
     !
   END SUBROUTINE classical_mc_run

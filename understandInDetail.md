@@ -2822,6 +2822,148 @@ NX = merge(1, N_DEFAULT, len_a1 > 2.0_dp * len_min)
 
 ---
 
+## 8. MPI 并行化状态分析
+
+### 8.1 para 模块架构
+
+WannChi 项目使用 `para.f90`（MPI版本）和 `para_serial.f90`（串行版本）实现并行/串行切换：
+
+- **MPI 版本** (`modules/para.f90`): 链接 `-lmpi`，使用 `__MPI` 预处理器宏
+- **串行版本** (`modules/para_serial.f90`): 所有 MPI 调用设为空操作，`distribute_calc` 返回 `first_idx=1, last_idx=nidx`
+
+**构建选择**：
+- Server (Intel+MPI): `cd modules && make mod.a` → 链接 `para.f90`
+- Laptop (gfortran): `cd build_laptop && make ...` → 链接 `para_serial.f90`
+
+### 8.2 模块 MPI 使用状态
+
+| 模块 | 使用 para | MPI 函数 | 说明 |
+|------|---------|---------|------|
+| `constants.f90` | 否 | - | 仅常量定义，无需并行 |
+| `linalgwrap.f90` | 否 | - | BLAS/LAPACK 封装，已被库优化 |
+| **`gp_bo.f90`** | **否** | - | 高优先级：候选点评估可并行 |
+| **`cma_es.f90`** | **否** | - | 高优先级：种群评估可并行 |
+| **`classical_mc.f90`** | **否** | - | 高优先级：温度点可并行（MC sweep） |
+| **`transp_calc.f90`** | **否** | - | 高优先级：k点积分可并行 |
+| `symmetry.f90` | 否 | - | 小矩阵操作，非瓶颈 |
+| `simp.f90` | 否 | - | 积分简化，非瓶颈 |
+| `wannlog.f90` | 否 | - | 日志输出，无需并行 |
+| `ahc_calc.f90` | 否 | - | 已废弃（被 transp_calc 替代） |
+| `para.f90` | 自身 | MPI 模块 | 核心并行抽象 |
+| `para_serial.f90` | 自身 | 串行桩 | 单进程回退 |
+| `lattice.f90` | 是 | `inode`, `para_sync_int`, `para_sync_cmplx` | 晶格数据同步 |
+| `wanndata.f90` | 是 | `para_sync_int`, `inode` | Hamiltonian 维度同步 |
+| `pade.f90` | 是 | `inode` | 主进程 I/O 判断 |
+| `intRPA.f90` | 是 | `inode`, `para_sync_int0`, `para_sync_int`, `para_sync_real` | RPA 块索引同步 |
+
+### 8.3 源文件 MPI 使用状态
+
+| 源文件 | 使用 para | 主要并行模式 |
+|--------|---------|------------|
+| `compute_chi.f90` | 是 | `distribute_calc(nq)` 分布 q 点循环 |
+| `wannchi.f90` | 是 | `init_para`, `finalize_para` |
+| `wannchiRPA.f90` | 是 | `init_para`, `distribute_calc` |
+| `wannchi_bare.f90` | 是 | `init_para`, `distribute_calc` |
+| `wannband.f90` | 是 | `distribute_calc`, `para_merge_real` |
+| **`wanneff_JS.f90`** | 是 | `init_para`, `distribute_calc`, `para_merge_*` |
+| `input.f90` | 是 | `para_sync_*` 广播输入参数 |
+| `output_chi.f90` | 是 | `inode` 主进程输出 |
+| `postchi.f90` | 是 | `init_para`, `finalize_para` |
+
+### 8.4 并行化升级建议
+
+#### 高优先级：已识别但未实现 MPI 的模块
+
+**1. `transp_calc.f90`** — k 点并行
+
+在 `calc_sigma_xy` 和 `calc_sigma_xx` 中，k 点循环是独立的：
+
+```fortran
+! 建议修改
+use para, only : distribute_calc, first_idx, last_idx, para_merge_real
+integer :: ik
+real(dp) :: sigma
+
+call distribute_calc(nk)  ! 分发 k 点
+sigma = 0.0_dp
+do ik = first_idx, last_idx
+    ! 计算第 ik 个 k 点的贡献
+    sigma = sigma + local_contribution(ik)
+enddo
+call para_merge_real(sigma, 1)  ! 汇总到所有进程
+```
+
+**2. `classical_mc.f90`** — 温度点并行
+
+MC 温度扫描中各温度点完全独立：
+
+```fortran
+! 建议修改
+use para, only : distribute_calc, first_idx, last_idx, inode, para_merge_real
+integer :: iT
+real(dp), dimension(3, n_temps) :: mvec_vs_T
+
+call distribute_calc(n_temps)
+do iT = first_idx, last_idx
+    call mc_sweep_at_T(mvec_vs_T(:, iT), T_list(iT))
+enddo
+call para_merge_real(mvec_vs_T, 3*n_temps)
+```
+
+**3. `gp_bo.f90`** — 候选点并行
+
+GP 贝叶斯优化中候选点评估可并行：
+
+```fortran
+! 建议修改
+use para, only : distribute_calc, first_idx, last_idx, para_merge_real
+integer :: icand
+real(dp), dimension(n_cand) :: f_vals
+
+call distribute_calc(n_cand)
+do icand = first_idx, last_idx
+    f_vals(icand) = objective(candidates(:, icand))
+enddo
+call para_merge_real(f_vals, n_cand)
+```
+
+**4. `cma_es.f90`** — 种群并行
+
+CMA-ES 进化策略中个体评估可并行：
+
+```fortran
+! 建议修改
+use para, only : distribute_calc, first_idx, last_idx, para_merge_real
+integer :: i
+real(dp), dimension(lambda) :: fitness
+
+call distribute_calc(lambda)
+do i = first_idx, last_idx
+    fitness(i) = evaluate_individual(population(:, i))
+enddo
+call para_merge_real(fitness, lambda)
+```
+
+### 8.5 验证方法
+
+**Laptop 构建（gfortran + para_serial）**：
+```bash
+cd wannchi/build_laptop
+make wanneff_js.x wannband.x
+cp wanneff_js.x wannband.x ../src/
+```
+
+**完整流程测试**：
+```bash
+source /Users/ykxu/Projects/hrJS/hrJS/bin/activate
+cd wannchi/tests
+python3 kagome_f_spinor_test.py
+```
+
+预期结果：7-8 PASS，0-1 FAIL（已知数值问题导致间歇性失败）。
+
+---
+
 ## 总结
 
 本文档提供了 WannChi 项目中所有子程序的详细分析，包括：
@@ -2831,5 +2973,6 @@ NX = merge(1, N_DEFAULT, len_a1 > 2.0_dp * len_min)
 3. **实现方法**: 算法实现细节
 4. **算法**: 计算流程和逻辑
 5. **对应公式**: 物理和数学公式
+6. **并行化状态**: MPI 使用情况及升级建议（第8节）
 
 所有子程序均按照模块和源文件进行组织，便于代码理解和维护。

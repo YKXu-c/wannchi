@@ -29,12 +29,18 @@
 !     sigma_xy in units of e^2/h for 2D (nk3=1).
 !     For 3D: multiply by 1/c_z where c_z is the z-periodicity.
 !
+!   MPI parallelization:
+!     k-point loops are distributed via distribute_calc(nk).
+!     Works with para_serial.f90 (serial stub) on laptop builds.
+!
 ! ===========================================================================
 MODULE transp_calc
   !
   use constants,  only : dp, twopi, cmplx_0, cmplx_i, eps6
   use wanndata,   only : wannham, calc_hk
-  use linalgwrap,  only : eigen
+  use linalgwrap, only : eigen
+  use para,       only : distribute_calc, first_idx, last_idx, para_merge_real0, &
+                        para_merge_cmplx0, para_merge_real, inode
   !
   implicit none
   !
@@ -198,9 +204,12 @@ CONTAINS
     allocate(hk(norb, norb), vx(norb, norb), vy(norb, norb))
     allocate(eig(norb), omega_n(norb), f_occ(norb))
     !
+    ! Distribute k-points across MPI ranks
+    call distribute_calc(nk)
+    !
     sigma_acc = 0.0_dp
     !
-    do ik = 1, nk
+    do ik = first_idx, last_idx
       !
       ! H(k): calc_hk overwrites hk
       call calc_hk(hk, ham, kvec_all(:, ik))
@@ -222,6 +231,9 @@ CONTAINS
       sigma_acc = sigma_acc + sum(f_occ * omega_n) * kwt_all(ik)
       !
     enddo
+    !
+    ! Merge results from all MPI ranks
+    call para_merge_real0(sigma_acc)
     !
     ! Prefactor: -e^2/h (units where e^2/h = 1, caller multiplies physical constants)
     ! sigma_xy in units of e^2/h (dimensionless * e^2/h)
@@ -259,7 +271,13 @@ CONTAINS
     allocate(hk(norb, norb), vx(norb, norb), vy(norb, norb))
     allocate(eig(norb), omega_n(norb), f_occ(norb))
     !
-    do ik = 1, nk
+    ! Distribute k-points across MPI ranks
+    call distribute_calc(nk)
+    !
+    ! Initialize output array (only ranks with indices will contribute via merge)
+    omega_kmap = 0.0_dp
+    !
+    do ik = first_idx, last_idx
       call calc_hk(hk, ham, kvec_all(:, ik))
       call eigen(eig, hk, norb)
       call calc_velocity(vx, ham, kvec_all(:, ik), 1)
@@ -268,6 +286,9 @@ CONTAINS
       call fermi_func(f_occ, eig, mu_chem, temperature, norb)
       omega_kmap(ik) = sum(f_occ * omega_n)
     enddo
+    !
+    ! Merge results from all MPI ranks
+    call para_merge_real(omega_kmap, nk)
     !
     deallocate(hk, vx, vy, eig, omega_n, f_occ)
     !
@@ -310,12 +331,15 @@ CONTAINS
     allocate(hk(norb, norb), vx(norb, norb))
     allocate(gf(norb, norb), tmp1(norb, norb), tmp2(norb, norb))
     !
+    ! Distribute k-points across MPI ranks
+    call distribute_calc(nk)
+    !
     ! Retarded Green's function evaluated at E_F + i*eta
     w_cmplx = cmplx(mu_chem, broadening, KIND=dp)
     !
     sigma_acc = cmplx_0
     !
-    do ik = 1, nk
+    do ik = first_idx, last_idx
       !
       call calc_hk(hk, ham, kvec_all(:, ik))
       !
@@ -337,6 +361,9 @@ CONTAINS
       sigma_acc = sigma_acc + sum([(tmp1(ii, ii), ii=1,norb)]) * kwt_all(ik)
       !
     enddo
+    !
+    ! Merge results from all MPI ranks
+    call para_merge_cmplx0(sigma_acc)
     !
     ! Extract imaginary part: σ_xx = -Im(bubble) / (2π)²
     ! The imaginary part of the retarded bubble gives the dissipative conductivity.

@@ -30,6 +30,10 @@
 !     - mu: number of parents (lambda/2)
 !     - sigma: step size (adapts during evolution)
 !
+!   MPI parallelization:
+!     Population evaluation (lambda individuals) is distributed via distribute_calc.
+!     Works with para_serial.f90 (serial stub) on laptop builds.
+!
 !   References:
 !     - Hansen & Ostermeier, Evolutionary Computation 9(2), 2001
 !     - Hansen et al., JMLR 20, 2019 (review)
@@ -38,6 +42,7 @@
 module cma_es
 
 use constants, only : stdout, dp
+use para,     only : distribute_calc, first_idx, last_idx, para_merge_real, inode, nnode
 
 implicit none
 
@@ -131,22 +136,34 @@ contains
     ! CMA-ES main loop
     do ii = 1, n_iter
       !
-      ! Sample lambda offspring
-      do k = 1, lambda
-        do jj = 1, n_params
-          call random_number(u)
-          x_pop((k-1)*n_params + jj) = mean(jj) + sigma(jj) * (u - 0.5_dp) * sqrt(12.0_dp)
-          ! Clip to bounds
-          x_pop((k-1)*n_params + jj) = max(bounds(1,jj), min(bounds(2,jj), &
-                                           x_pop((k-1)*n_params + jj)))
+      ! Sample lambda offspring (done by rank 0, broadcast to others via para_sync)
+      if (inode == 0) then
+        do k = 1, lambda
+          do jj = 1, n_params
+            call random_number(u)
+            x_pop((k-1)*n_params + jj) = mean(jj) + sigma(jj) * (u - 0.5_dp) * sqrt(12.0_dp)
+            ! Clip to bounds
+            x_pop((k-1)*n_params + jj) = max(bounds(1,jj), min(bounds(2,jj), &
+                                             x_pop((k-1)*n_params + jj)))
+          enddo
         enddo
-      enddo
+      endif
       !
-      ! Evaluate fitness
-      do k = 1, lambda
+      ! Distribute fitness evaluations across MPI ranks
+      call distribute_calc(lambda)
+      !
+      ! Initialize fitness to 0 (unevaluated positions will sum to 0 across ranks)
+      fitness = 0.0_dp
+      !
+      ! Each rank evaluates its assigned individuals
+      do k = first_idx, last_idx
         fitness(k) = objective_func(x_pop((k-1)*n_params+1 : k*n_params), n_params)
         nfe = nfe + 1
       enddo
+      !
+      ! Merge fitness values from all ranks
+      call para_merge_real(fitness, lambda)
+      nfe = nfe / int(nnode, dp)  ! approximate: each rank counted its portion
       !
       ! Sort by fitness (ascending) - simple bubble sort
       do jj = 1, lambda-1
