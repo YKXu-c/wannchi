@@ -40,6 +40,8 @@
 5. [构建说明](#5-构建说明)
 6. [问答](#6-问答)
 7. [附录：Fortran 语法参考](#7-附录fortran-语法参考)
+8. [MPI 并行化状态分析](#8-mpi-并行化状态分析)
+9. [已知错误与设计缺陷](#9-已知错误与设计缺陷)
 
 ---
 
@@ -124,18 +126,25 @@ SUBROUTINE init_para(codename)
 - 分配 `map(nnode, 2)` 数组
 - 在 master 进程 (inode=0) 输出程序运行信息
 
-**算法**:
-```
-if (defined __MPI):
-    mpi_init()
-    mpi_comm_rank(MPI_COMM_WORLD, inode)
-    mpi_comm_size(MPI_COMM_WORLD, nnode)
-    allocate(map(nnode, 2))
-    if (inode == 0) print "codename running on nnode nodes"
-else:
-    inode = 0
-    nnode = 1
-    print "codename serial"
+**源代码**:
+```fortran
+#if defined __MPI
+  integer ierr
+  !
+  CALL mpi_init(ierr)
+  !
+  CALL mpi_comm_rank(mpi_comm_world, inode, ierr)
+  CALL mpi_comm_size(mpi_comm_world, nnode, ierr)
+  !
+  if (inode.eq.0) write(stdout, *) trim(codename)//" running on ", nnode, " nodes..."
+  !
+  allocate(map(nnode, 2))
+  !
+#else
+  inode=0
+  nnode=1
+  write(stdout, *) trim(codename)//" serial ..."
+#endif
 ```
 
 ---
@@ -152,10 +161,12 @@ SUBROUTINE finalize_para()
 **实现方法**:
 - 如果定义了 `__MPI`，调用 `mpi_finalize`
 
-**算法**:
-```
-if (defined __MPI):
-    mpi_finalize()
+**源代码**:
+```fortran
+#if defined __MPI
+  integer ierr
+  CALL mpi_finalize(ierr)
+#endif
 ```
 
 ---
@@ -175,15 +186,22 @@ SUBROUTINE distribute_calc(nidx)
 - 设置 first_idx 和 last_idx 范围
 - 通过 `para_merge_int` 同步 map 信息到所有进程
 
-**算法** (伪代码):
-```
-block_size = nidx / nnode
-first_idx = inode * block_size + 1
-last_idx = (inode + 1) * block_size
-map[inode+1, 1] = first_idx - 1
-map[inode+1, 2] = last_idx - first_idx + 1
-if (defined __MPI):
-    para_merge_int(map, 2*nnode)
+**源代码**:
+```fortran
+#if defined __MPI
+  !
+  map(:, :)=0
+  first_idx=inode*nidx/nnode+1
+  last_idx=(inode+1)*nidx/nnode
+  map(inode+1, 1)=first_idx-1
+  map(inode+1, 2)=last_idx-first_idx+1
+  !
+  call para_merge_int(map, 2*nnode)
+  !
+#else
+  first_idx=1
+  last_idx=nidx
+#endif
 ```
 
 **公式**:
@@ -303,14 +321,21 @@ SUBROUTINE para_collect_cmplx(fulldat, dat, blk_size)
 - 创建连续的 MPI 数据类型 `blk_cmplx`
 - 使用 `mpi_gatherv` 收集数据到 fulldat
 
-**算法**:
-```
-blk_cmplx = MPI_CONTIGUOUS(blk_size, MPI_DOUBLE_COMPLEX)
-mpi_type_commit(blk_cmplx)
-mpi_gatherv(dat, map[inode+1, 2], blk_cmplx, 
-            fulldat, map[:, 2], map[:, 1], 
-            blk_cmplx, 0, MPI_COMM_WORLD)
-mpi_type_free(blk_cmplx)
+**源代码**:
+```fortran
+#if defined __MPI
+  !
+  ! We need to use mpi_type
+  integer ierr, blk_cmplx
+  !
+  call mpi_type_contiguous(blk_size, MPI_DOUBLE_COMPLEX, blk_cmplx, ierr)
+  ! new type object created
+  call mpi_type_commit(blk_cmplx, ierr)
+  ! now type1 can be used for communication
+  call mpi_gatherv(dat, map(inode+1, 2), blk_cmplx, fulldat, map(:, 2), map(:, 1), blk_cmplx, 0, mpi_comm_world, ierr)
+  call mpi_type_free(blk_cmplx, ierr)
+  !
+#endif
 ```
 
 ---
@@ -375,24 +400,62 @@ SUBROUTINE read_ham(ham, seed)
 - 读取 Hamiltonian 矩阵元
 - 通过 `para_sync_*` 同步数据到所有进程
 
-**算法**:
-```
-if (inode == 0):
-    open trim(seed)//"_hr.dat"
-    read norb, nrpt
-    allocate arrays
-    read weight(1:nrpt)
-    for irpt=1 to nrpt:
-        for iorb=1 to norb:
-            for jorb=1 to norb:
-                read Rvec, i, j, Re[H], Im[H]
-                if (R == (0,0,0)) r000 = irpt
-                hr(j,i,irpt) = complex(Re, Im)
-    close file
-sync hr to all nodes
-sync weight to all nodes
-sync rvec to all nodes
-sync r000 to all nodes
+**源代码**:
+```fortran
+  if (inode.eq.0) then
+    write(stdout, *) " # Reading file "//trim(seed)//"_hr.dat"
+    !
+    open(unit=fin, file=trim(seed)//"_hr.dat")
+    !
+    read(fin, *)
+    read(fin, *) tt(1) ! norb
+    read(fin, *) tt(2) ! nrpt
+    !
+    write(stdout, *) " #  Dimensions:"
+  endif
+  !
+  CALL para_sync_int(tt, 2)
+  ham%norb=tt(1)
+  ham%nrpt=tt(2)
+  !
+  allocate(ham%hr(ham%norb, ham%norb, ham%nrpt))
+  allocate(ham%weight(ham%nrpt))
+  allocate(ham%rvec(3, ham%nrpt))
+  allocate(ham%tau(3, ham%norb))
+  !
+  ham%tau(:,:)=0.d0
+  !
+  if (inode.eq.0) then
+    write(stdout, *) "    # of orbitals:", ham%norb
+    write(stdout, *) "    # of real-space grid:", ham%nrpt
+    allocate(wt(1:ham%nrpt))
+    read(fin, '(15I5)') (wt(irpt),irpt=1,ham%nrpt)
+    ham%weight(:)=wt(:)
+    deallocate(wt)
+    !
+    do irpt=1, ham%nrpt
+      do iorb=1, ham%norb
+        do jorb=1, ham%norb
+          read(fin, *) tt, a, b
+          if ((jorb.eq.1).and.(iorb.eq.1)) then
+            ham%rvec(:, irpt)=tt(1:3)
+            if (tt(1)**2+tt(2)**2+tt(3)**2.eq.0) then
+              ham%r000=irpt
+            endif
+          endif
+          ham%hr(jorb, iorb, irpt)=CMPLX(a, b, KIND=dp)
+        enddo
+      enddo
+    enddo
+    !
+    close(unit=fin)
+    write(stdout, *) " # Done."
+  endif
+  !
+  CALL para_sync_cmplx(ham%hr, ham%norb * ham%norb * ham%nrpt)
+  CALL para_sync_real(ham%weight, ham%nrpt)
+  CALL para_sync_real(ham%rvec, 3*ham%nrpt)
+  CALL para_sync0(ham%r000)
 ```
 
 **关键公式**:
@@ -453,21 +516,25 @@ SUBROUTINE calc_hk(hk, ham, kvec)
 - 对每个 R 格子，计算 $e^{i\mathbf{k}\cdot\mathbf{R}}$ 因子
 - 累加所有 R 格子的贡献
 
-**算法** (伪代码):
-```
-hk = 0
-! 计算轨道位置相位因子
-do io = 1 to norb:
-    ktau = sum(kvec(:) * tau(:, io)) * 2*pi
-    phase(io) = exp(i * ktau)
-
-! Fourier 变换
-do ir = 1 to nrpt:
-    rdotk = sum(kvec(:) * rvec(:, ir)) * 2*pi
-    fact = exp(i * rdotk) / weight(ir)
-    do io = 1 to norb:
-        do jo = 1 to norb:
-            hk(io, jo) += fact * conjg(phase(io)) * phase(jo) * hr(io, jo, ir)
+**源代码**:
+```fortran
+  hk(:,:)=cmplx_0
+  !
+  do io=1, ham%norb
+    ktau=sum(kvec(:)*ham%tau(:, io))*twopi
+    phase(io)=cmplx(cos(ktau), sin(ktau), KIND=dp)
+  enddo
+  !
+  do ir=1, ham%nrpt
+    rdotk=sum(kvec(:)*ham%rvec(:, ir))*twopi
+    fact=cmplx(cos(rdotk), sin(rdotk), KIND=dp)/ham%weight(ir)
+    !
+    do io=1, ham%norb
+      do jo=1, ham%norb
+        hk(io, jo)=hk(io, jo)+fact*conjg(phase(io))*phase(jo)*ham%hr(io, jo, ir)
+      enddo
+    enddo
+  enddo
 ```
 
 **公式**:
@@ -543,10 +610,14 @@ subroutine dinvmat(xmat, ndim)
 
 **实现方法**: 使用 LAPACK 的 `dgetrf` + `dgetri`
 
-**算法**:
-```
-call dgetrf(ndim, ndim, xmat, ndim, ipiv, info)
-call dgetri(ndim, xmat, ndim, ipiv, work, ndim, info)
+**源代码**:
+```fortran
+  real(dp), dimension(ndim) :: work
+  integer, dimension(ndim) :: ipiv
+  integer :: info
+  !
+  call dgetrf(ndim, ndim, xmat, ndim, ipiv, info)
+  call dgetri(ndim, xmat, ndim, ipiv, work, ndim, info)
 ```
 
 **公式**: 通过 LU 分解求矩阵逆
@@ -566,10 +637,14 @@ subroutine zinvmat(xmat, ndim)
 
 **实现方法**: 使用 LAPACK 的 `zgetrf` + `zgetri`
 
-**算法**:
-```
-call zgetrf(ndim, ndim, xmat, ndim, ipiv, info)
-call zgetri(ndim, xmat, ndim, ipiv, work, ndim, info)
+**源代码**:
+```fortran
+  complex(dp), dimension(ndim) :: work
+  integer, dimension(ndim) :: ipiv
+  integer :: info
+  !
+  call zgetrf(ndim, ndim, xmat, ndim, ipiv, info)
+  call zgetri(ndim, xmat, ndim, ipiv, work, ndim, info)
 ```
 
 ---
@@ -588,9 +663,13 @@ subroutine heigen(eig, xmat, ndim)
 
 **实现方法**: 使用 LAPACK 的 `zheev`
 
-**算法**:
-```
-call zheev('V', 'U', ndim, xmat, ndim, eig, work, 2*ndim, rwork, info)
+**源代码**:
+```fortran
+  integer info
+  complex(dp), dimension(2*ndim) :: work
+  complex(dp), dimension(3*ndim) :: rwork
+  !
+  call zheev('V', 'U', ndim, xmat, ndim, eig, work, 2*ndim, rwork, info)
 ```
 
 **公式**: 求解 $H\psi = \lambda\psi$，其中 $H = H^\dagger$
@@ -611,10 +690,16 @@ subroutine geigen(eig, xmat, ndim)
 
 **实现方法**: 使用 LAPACK 的 `zgeev`
 
-**算法**:
-```
-call zgeev('N', 'V', ndim, xmat, ndim, eig, vl, 1, vr, ndim, work, 2*ndim, rwork, info)
-xmat = vr  ! 用右本征向量覆盖输入矩阵
+**源代码**:
+```fortran
+  integer info
+  complex(dp), dimension(2*ndim) :: work
+  complex(dp), dimension(2*ndim) :: rwork
+  complex(dp), dimension(1, 1)   :: vl
+  complex(dp), dimension(ndim, ndim) :: vr
+  !
+  call zgeev('N', 'V', ndim, xmat, ndim, eig, vl, 1, vr, ndim, work, 2*ndim, rwork, info)
+  xmat(:, :)=vr(:, :)
 ```
 
 ---
@@ -639,14 +724,17 @@ subroutine sparsemulmat(zmat, xmat_cp, ymat, idxcp, ndim, nidxcp, alpha, beta)
 - idxcp 存储非零元素在满矩阵中的 (i,j) 索引
 - 直接遍历计算
 
-**算法** (伪代码):
-```
-z = beta * z
-do ii = 1 to nidxcp:
-    i1 = idxcp(1, ii)
-    i2 = idxcp(2, ii)
-    do jj = 1 to ndim:
-        z(i1, jj) += alpha * xmat_cp(ii) * ymat(i2, jj)
+**源代码**:
+```fortran
+  zmat(:, :)=beta*zmat(:, :)
+  !
+  do ii=1, nidxcp
+    i1=idxcp(1, ii)
+    i2=idxcp(2, ii)
+    do jj=1, ndim
+      zmat(i1, jj)=zmat(i1, jj)+alpha*xmat_cp(ii)*ymat(i2, jj)
+    enddo
+  enddo
 ```
 
 **公式**:
@@ -669,14 +757,16 @@ subroutine matmulsparse(zmat, xmat, ymat_cp, idxcp, ndim, nidxcp, alpha, beta)
     real(dp) :: alpha, beta
 ```
 
-**算法** (伪代码):
-```
-z = beta * z
-do ii = 1 to ndim:
-    do jj = 1 to nidxcp:
-        j1 = idxcp(1, jj)
-        j2 = idxcp(2, jj)
-        z(ii, j2) += alpha * xmat(ii, j1) * ymat_cp(jj)
+**源代码**:
+```fortran
+  zmat(:, :)=beta*zmat(:, :)
+  do ii=1, ndim
+    do jj=1, nidxcp
+      j1=idxcp(1, jj)
+      j2=idxcp(2, jj)
+      zmat(ii, j2)=zmat(ii, j2)+alpha*xmat(ii, j1)*ymat_cp(jj)
+    enddo
+  enddo
 ```
 
 ---
@@ -974,6 +1064,16 @@ subroutine init_simp(imp, ndim, l)
 - 设置 ndim 和 lang
 - 分配 gidx(ndim), Utrans(ndim, ndim), sigidx(ndim, ndim)
 
+**源代码**:
+```fortran
+  imp%ndim=ndim
+  imp%lang=l
+  !
+  allocate(imp%gidx(ndim))
+  allocate(imp%Utrans(ndim, ndim))
+  allocate(imp%sigidx(ndim, ndim))
+```
+
 ---
 
 ##### 1.6.2 `finalize_simp(imp)`
@@ -986,7 +1086,12 @@ subroutine finalize_simp(imp)
     TYPE(simp), intent(inout) :: imp
 ```
 
-**实现方法**: deallocate 所有分配数组
+**源代码**:
+```fortran
+  if (allocated(imp%gidx))   deallocate(imp%gidx)
+  if (allocated(imp%Utrans)) deallocate(imp%Utrans)
+  if (allocated(imp%sigidx)) deallocate(imp%sigidx)
+```
 
 ---
 
@@ -1006,17 +1111,30 @@ subroutine matrix2pack(sigpack, sigmat, imp)
 - 先进行基变换: $s_{\text{tmp1}} = U_{\text{trans}}^\dagger \cdot \Sigma \cdot U_{\text{trans}}$
 - 然后根据 sigidx 映射填充 sigpack
 
-**算法**:
-```
-! 基变换
-call zgemm('N', 'C', ndim, ndim, ndim, 1, sigmat, ndim, Utrans, ndim, 0, stmp1, ndim)
-call zgemm('N', 'N', ndim, ndim, ndim, 1, Utrans, ndim, stmp1, ndim, 0, stmp2, ndim)
-
-! 填充打包形式
-do ii = 1 to ndim:
-    do jj = 1 to ndim:
-        if (imp%sigidx(ii, jj) > 0):
-            sigpack(imp%sigidx(ii, jj)) += sigmat(ii, jj)
+**源代码**:
+```fortran
+  complex(dp), dimension(imp%ndim, imp%ndim) :: stmp1, stmp2
+  integer ii, jj
+  !
+  call zgemm('N', 'C', imp%ndim, imp%ndim, imp%ndim, &
+              cmplx_1, sigmat, imp%ndim, &
+              imp%Utrans, imp%ndim, &
+              cmplx_0, stmp1, imp%ndim)
+  !
+  call zgemm('N', 'N', imp%ndim, imp%ndim, imp%ndim, &
+              cmplx_1, imp%Utrans, imp%ndim, &
+              stmp1, imp%ndim, &
+              cmplx_0, stmp2, imp%ndim)
+  !
+  do ii=1, imp%ndim
+    do jj=1, imp%ndim
+      !
+      if (imp%sigidx(ii, jj)>0) then
+        sigpack(imp%sigidx(ii, jj))=sigpack(imp%sigidx(ii, jj))+sigmat(ii, jj)
+      endif
+      !
+    enddo
+  enddo
 ```
 
 **公式**:
@@ -1038,18 +1156,29 @@ subroutine restore_matrix(sigmat, sigpack, imp)
 
 **实现方法**: 与 matrix2pack 相反的过程
 
-**算法**:
-```
-! 从打包形式恢复
-sigmat = 0
-do ii = 1 to ndim:
-    do jj = 1 to ndim:
-        if (imp%sigidx(ii, jj) > 0):
-            sigmat(ii, jj) = sigpack(imp%sigidx(ii, jj))
-
-! 基变换
-call zgemm('N', 'N', ndim, ndim, ndim, 1, sigmat, ndim, Utrans, ndim, 0, stmp, ndim)
-call zgemm('C', 'N', ndim, ndim, ndim, 1, Utrans, ndim, stmp, ndim, 0, sigmat, ndim)
+**源代码**:
+```fortran
+  sigmat=cmplx_0
+  !
+  do ii=1, imp%ndim
+    do jj=1, imp%ndim
+      !
+      if (imp%sigidx(ii, jj)>0) then
+        sigmat(ii, jj)=sigpack(imp%sigidx(ii, jj))
+      endif
+      !
+    enddo
+  enddo
+  !
+  call zgemm('N', 'N', imp%ndim, imp%ndim, imp%ndim, &
+              cmplx_1, sigmat, imp%ndim, &
+              imp%Utrans, imp%ndim, &
+              cmplx_0, stmp, imp%ndim)
+  !
+  call zgemm('C', 'N', imp%ndim, imp%ndim, imp%ndim, &
+              cmplx_1, imp%Utrans, imp%ndim, &
+              stmp, imp%ndim, &
+              cmplx_0, sigmat, imp%ndim)
 ```
 
 ---
@@ -1124,8 +1253,59 @@ Kagome                  ! 注释行
 - 解析原子位置和轨道数
 - 计算倒格子矢量
 
-**公式**:
-$$b_i \cdot a_j = 2\pi \delta_{ij}$$
+**源代码**:
+```fortran
+subroutine read_posfile(fn)
+  character(*), intent(in) :: fn
+  real(dp)  :: alat
+  real(dp), dimension(3)  :: xx
+  integer   :: ii, jj, nn, ispin
+  if (inode.eq.0) then
+    open(unit=fin, file=trim(fn))
+    read(fin, *) ! First line is comment
+    read(fin, *) alat
+    do ii=1, 3
+      read(fin, *) xx
+      avec(:, ii)=xx(:)*alat
+    enddo
+    bvec(:, :)= avec(:, :)
+    call invmat(bvec, 3)
+    read(fin, *) nsite, ispin
+  endif
+  call para_sync_real(avec, 9)
+  call para_sync_real(bvec, 9)
+  call para_sync_int0(nsite)
+  call para_sync_int0(ispin)
+  allocate(xat(3, nsite))
+  allocate(zat(nsite))
+  allocate(nbasis(nsite))
+  spinor=(ispin>0)
+  if (inode.eq.0) then
+    do ii=1, nsite
+      read(fin, *) zat(ii), xat(:, ii), nbasis(ii)
+    enddo
+    close(unit=fin)
+  endif
+  call para_sync_int(zat, nsite)
+  call para_sync_int(nbasis, nsite)
+  call para_sync_real(xat, 3*nsite)
+  nn=1
+  do ii=1, nsite
+    do jj=1, nbasis(ii)
+      ham%tau(:, nn)=xat(:, ii)
+      nn=nn+1
+    enddo
+  enddo
+  if (spinor) then
+    do ii=1, nsite
+      do jj=1, nbasis(ii)
+        ham%tau(:, nn)=xat(:, ii)
+        nn=nn+1
+      enddo
+    enddo
+  endif
+end subroutine
+```
 
 ---
 
@@ -1151,6 +1331,65 @@ nk1 nk2 nk3  ! k-mesh 密度
 - 读取网格密度 nk1, nk2, nk3
 - 生成以 Gamma 为中心的均匀网格
 - 通过对称性找到不可约 k 点
+
+**源代码**:
+```fortran
+subroutine read_kmesh(fn)
+  integer ik1, ik2, ik3, iik
+  integer, dimension(4) :: tt
+  !
+  if (inode.eq.0) then
+    open(unit=fin, file=trim(fn))
+    read(fin, *)      ! COMMENT
+    read(fin, *) iik  ! SWITCH
+    !
+    if (iik.eq.0) then
+      ! AUTOMATIC K_MESH
+      read(fin, *)    ! Always use Gamma-centered
+      read(fin, *) nk1, nk2, nk3
+      nkirr=nk1*nk2*nk3
+    else
+      read(fin, *)
+      nkirr=iik
+    endif
+    !
+    tt(1)=nk1; tt(2)=nk2; tt(3)=nk3; tt(4)=nkirr
+    !
+  endif
+  !
+  CALL para_sync_int(tt, 4)
+  nk1=tt(1); nk2=tt(2); nk3=tt(3); nkirr=tt(4)
+  !
+  allocate(kwt(nkirr), kvec(3, nkirr))
+  !
+  if (inode.eq.0) then
+    if (iik.eq.0) then
+      do ik1=0, nk1-1
+        do ik2=0, nk2-1
+          do ik3=0, nk3-1
+            iik=ik1*nk2*nk3+ik2*nk3+ik3+1
+            kwt(iik)=1.d0
+            kvec(1, iik)=ik1*1.d0/nk1
+            kvec(2, iik)=ik2*1.d0/nk2
+            kvec(3, iik)=ik3*1.d0/nk3
+          enddo
+        enddo
+      enddo
+    else
+      ! IBZKPT form
+      do iik=1, nkirr
+        read(fin, *) kvec(:, iik), ik1
+        kwt(iik)=ik1*1.d0
+      enddo
+    endif
+    close(unit=fin)
+  endif
+  !
+  call para_sync_real(kwt, nkirr)
+  call para_sync_real(kvec, nkirr*3)
+  kwt(:)=kwt(:)/SUM(kwt(:))
+end subroutine
+```
 
 ---
 
@@ -1180,6 +1419,68 @@ LocRot
 0.0 0.0 1.0
 ```
 
+**源代码**:
+```fortran
+subroutine read_impfile(fn)
+  integer, dimension(2) :: tt
+  integer ii, jj, kk
+  real(dp), dimension(:), allocatable :: aa
+  character(len=256)    :: key
+  real(dp), dimension(3, 3) :: locrot
+  !
+  if (inode.eq.0) then
+    open(unit=fin, file=trim(fn))
+    read(fin, *) nimp
+  endif
+  !
+  call para_sync0(nimp)
+  allocate(imp(nimp))
+  !
+  do ii=1, nimp
+    if (inode.eq.0) then
+      read(fin, *) key       !  IMP idx
+      read(fin, *) tt        !  ndim,  l
+    endif
+    call para_sync_int(tt, 2)
+    call init_simp(imp(ii), tt(1), tt(2))
+    !
+    if (inode.eq.0) then
+      read(fin, *) key       ! BasisMap
+      if (trim(key)/='BasisMap') stop
+      read(fin, *) imp(ii)%gidx(:)
+      read(fin, *) key       ! Sigidx
+      if (trim(key)/='Sigidx') stop
+      do jj=1, imp(ii)%ndim
+        read(fin, *) imp(ii)%sigidx(jj, :)
+      enddo
+      read(fin, *) key       ! Transformation Matrix or Local Rotation
+      if (trim(key)=='Transformation') then
+        allocate(aa(2*imp(ii)%ndim))
+        do jj=1, imp(ii)%ndim
+          read(fin, *) aa
+          do kk=1, imp(ii)%ndim
+            imp(ii)%Utrans(jj, kk)=aa(kk*2-1)+aa(kk*2)*cmplx_i
+          enddo
+        enddo
+        deallocate(aa)
+      else
+        do jj=1, 3
+          read(fin, *) locrot(jj, :)
+        enddo
+        call find_Utrans_from_locrot(imp(ii)%Utrans, imp(ii)%lang, &
+                                      imp(ii)%ndim, locrot)
+      endif
+    endif
+    !
+    call para_sync_int(imp(ii)%gidx, imp(ii)%ndim)
+    call para_sync_int(imp(ii)%sigidx, imp(ii)%ndim*imp(ii)%ndim)
+    call para_sync_cmplx(imp(ii)%Utrans, imp(ii)%ndim*imp(ii)%ndim)
+    !
+  enddo
+  if (inode.eq.0) close(unit=fin)
+end subroutine
+```
+
 ---
 
 ##### 1.7.4 `setup_mapping()`
@@ -1196,28 +1497,50 @@ SUBROUTINE setup_mapping()
 - 计算 ndimf 和 ndimc
 - 构建 f2g_idx, c2g_idx, g2f_idx, g2c_idx
 
-**算法**:
-```
-partition = 0
-do ii = 1 to nimp:
-    partition(imp(ii)%gidx(:)) = ii
-    
-ndimf = sum(imp(ii)%ndim)
-ndimc = norb - ndimf
-
-allocate(f2g_idx(ndimf), c2g_idx(ndimc), g2f_idx(norb), g2c_idx(norb))
-
-jj = 1
-kk = 1
-do ii = 1 to norb:
-    if (partition(ii) > 0):
-        f2g_idx(jj) = ii
-        g2f_idx(ii) = jj
-        jj = jj + 1
-    else:
-        c2g_idx(kk) = ii
-        g2c_idx(ii) = kk
-        kk = kk + 1
+**源代码**:
+```fortran
+  allocate(partition(ham%norb))
+  !
+  ndimf=0
+  ndimc=0
+  !
+  partition(:)=0
+  !
+  do ii=1, nimp
+    ndimf=ndimf+imp(ii)%ndim
+    partition(imp(ii)%gidx(:))=ii
+  enddo
+  ndimc=ham%norb-ndimf
+  !
+  allocate(f2g_idx(ndimf))
+  allocate(c2g_idx(ndimc))
+  !
+  allocate(g2f_idx(ham%norb))
+  allocate(g2c_idx(ham%norb))
+  !
+  g2f_idx=0
+  g2c_idx=0
+  !
+  jj=1
+  kk=1
+  do ii=1, ham%norb
+    !
+    if (partition(ii)>0) then
+      f2g_idx(jj)=ii
+      g2f_idx(ii)=jj
+      jj=jj+1
+    else
+      c2g_idx(kk)=ii
+      g2c_idx(ii)=kk
+      kk=kk+1
+    endif
+    !
+  enddo
+  !
+  if (jj.ne.(ndimf+1) .or. kk.ne.(ndimc+1)) then
+    write(*, *) "!!! FATAL: Incorrect F/C partition!"
+    stop
+  endif
 ```
 
 ---
@@ -1233,6 +1556,23 @@ SUBROUTINE fix_sigma_static()
 
 **实现方法**:
 - 对于每个 k 点，将 sinf 加到 Hamiltonian 对角元
+
+**源代码**:
+```fortran
+subroutine fix_sigma_static
+  !
+  complex(dp), dimension(ham%norb, ham%norb) :: sigmat
+  !
+  call restore_lattice(sigmat, sinf)
+  ham%hr(:, :, ham%r000)=ham%hr(:, :, ham%r000)+sigmat
+  !
+  if (inode.eq.0) then
+    write(stdout, *) " Sinf matrix expands to:"
+    call print_impurity(sigmat)
+  endif
+  !
+end subroutine
+```
 
 ---
 
@@ -1251,6 +1591,21 @@ SUBROUTINE get_sigma_matrix(sigfull, z)
 - 调用 interpolate_single_sigma 获取打包形式的自能
 - 通过 restore_matrix 恢复满空间形式
 
+**源代码**:
+```fortran
+subroutine get_sigma_matrix(sigfull, z)
+  !
+  complex(dp), dimension(ham%norb, ham%norb) :: sigfull
+  complex(dp)  :: z
+  !
+  complex(dp), dimension(nbath)  :: sigma
+  !
+  call interpolate_single_sigma(sigma, z)
+  call restore_lattice(sigfull, sigma)
+  !
+end subroutine
+```
+
 ---
 
 ##### 1.7.7 `interpolate_single_sigma(sigval, w)`
@@ -1268,6 +1623,63 @@ SUBROUTINE interpolate_single_sigma(sigval, w)
 - 如果 w 在网格内，直接返回值
 - 如果 w 在网格间，线性插值
 - 如果 w 在高频尾区，使用渐近展开
+
+**源代码**:
+```fortran
+subroutine interpolate_single_sigma(sig, z)
+  !
+  complex(dp), dimension(nbath) :: sig
+  complex(dp) :: z
+  !
+  complex(dp), dimension(nbath) :: sigtmp
+  real(dp) :: w  ! The pure imaginary part of z
+  !
+  real(dp) :: ff
+  real(dp) :: a, b, c, d
+  integer ii
+  !
+  w=aimag(z)
+  beta=(2*nw-1.d0)*twopi/(2.d0*aimag(omega(nw)))
+  ff=(abs(w)*beta/twopi+0.5d0)
+  ii=nint(ff)
+  if (abs(ff-ii)<eps6 .and. ii<=nw) then
+    ! Exactly on the mesh
+    sigtmp(:)=sigpack(:, ii)
+  else if (ff>nw) then
+    ! Out of the mesh - use high-frequency tail
+    do ii=1, nbath
+      w1=aimag(omega(nw-10)); w2=aimag(omega(nw))
+      s11=real(sigpack(ii, nw-10)); s12=aimag(sigpack(ii, nw-10))
+      s21=real(sigpack(ii, nw)); s22=aimag(sigpack(ii, nw))
+      a=(s21-s11)/(1.d0/(w2*w2)-1.d0/(w1*w1))
+      d=(s21*w2*w2-s11*w1*w1)/(w2*w2-w1*w1)
+      if (abs(s22)<eps6 .or. abs(s12)<eps6) then
+        b=0.d0; c=0.d0
+      else
+        b=-(w2*s22-w1*s12)/(s22/w2-s12/w1)
+        c=(w2*w2-w1*w1)/(w2/s22-w1/s12)
+      endif
+      sigtmp(ii)=d+a/(w*w)+cmplx_i*c*abs(w)/(w*w+b)
+    enddo
+  else if (ff>ii .and. ii<nw) then
+    ! Between ii and ii+1 - linear interpolation
+    sigtmp(:)=(ii+1-ff)*sigpack(:, ii)+(ff-ii)*sigpack(:, ii+1)
+  else if (ff<ii .and. ii>0) then
+    ! Between ii and ii-1 - linear interpolation
+    sigtmp(:)=(ii-ff)*sigpack(:, ii-1)+(ff-ii+1)*sigpack(:, ii)
+  else
+    write(*, *)  '!!! FATAL: Incorrect matsubara frequency! Are you sure?'
+    stop
+  endif
+  !
+  if (w>0) then
+    sig(:)=sigtmp(:)
+  else
+    sig(:)=conjg(sigtmp(:))
+  endif
+  !
+end subroutine
+```
 
 **公式**:
 - **Matsubara 频率**: $\omega_n = i\frac{2\pi(n-1)}{\beta}$
@@ -1311,41 +1723,100 @@ SUBROUTINE read_RPA()
 4. 构建 CCidx (排除 FF 块轨道)
 5. 读取 U 矩阵元
 
-**算法**:
-```
-read nffblk
-read blkdim(1:nffblk)
-
-nFFidx = sum(blkdim(i)^2)
-nCCidx = norb - sum(blkdim(i))
-
-mapping = 0
-do ii = 1 to nffblk:
-    read blkidx(1:blkdim(ii))
-    mapping(blkidx) = ii
-    
-    ! 构建 FFidx
-    jj = 1
-    do j1 = 1 to blkdim(ii):
-        do j2 = 1 to blkdim(ii):
-            FFidx(1, jj) = blkidx(j1)
-            FFidx(2, jj) = blkidx(j2)
-            jj = jj + 1
-
-! 构建 CCidx
-jj = 1
-do ii = 1 to norb:
-    if (mapping(ii) == 0):
-        CCidx(jj) = ii
-        jj = jj + 1
-
-! 读取 U 矩阵
-read nUcp
-do ii = 1 to nUcp:
-    read i1, i2, j1, j2, Uij
-    idxUcp(1, ii) = i1
-    idxUcp(2, ii) = i2
-    Uint_cp(ii) = Uij
+**源代码**:
+```fortran
+  if (inode.eq.0) then
+    !
+    open(unit=fin, file="RPA.inp")
+    read(fin, *) nffblk
+    allocate(blkdim(nffblk))
+    read(fin, *) blkdim
+    !
+    nFFidx=0
+    nCCidx=ham%norb
+    !
+    do ii=1, nffblk
+      nFFidx=nFFidx+blkdim(ii)*blkdim(ii)
+      nCCidx=nCCidx-blkdim(ii)
+    enddo
+    !
+  endif
+  !
+  mapping=0
+  !
+  call para_sync_int0(nFFidx)
+  call para_sync_int0(nCCidx)
+  !
+  if (nCCidx<0) then
+    write(*, *) " !!! Incorrect RPA division!"
+    stop
+  endif
+  !
+  allocate(FFidx(2, nFFidx))
+  if (nCCidx>0) allocate(CCidx(nCCidx))
+  !
+  if (inode.eq.0) then
+    !
+    jj=1
+    do ii=1, nffblk
+      !
+      allocate(blkidx(blkdim(ii)))
+      !
+      read(fin, *) blkidx(:)
+      mapping(blkidx(:))=ii
+      !
+      do j1=1, blkdim(ii)
+        do j2=1, blkdim(ii)
+          FFidx(1, jj)=blkidx(j1)
+          FFidx(2, jj)=blkidx(j2)
+          jj=jj+1
+        enddo
+      enddo
+      !
+      deallocate(blkidx)
+      !
+    enddo
+    !
+    jj=1
+    do ii=1, ham%norb
+      !
+      if (mapping(ii).eq.0) then
+        CCidx(jj)=ii
+        jj=jj+1
+      endif
+      !
+    enddo
+    !
+    read(fin, *) nUcp
+    !
+  endif
+  !
+  call para_sync_int(FFidx, nFFidx*2)
+  if (nCCidx>0) call para_sync_int(CCidx, nCCidx)
+  call para_sync_int0(nUcp)
+  !
+  if (nUcp.ne.0) then
+    !
+    allocate(Uint_cp(nUcp), idxUcp(2, nUcp))
+    !
+    if (inode.eq.0) then
+      !
+      do ii=1, nUcp
+        !
+        read(fin, *) i1, i2, j1, j2, Uint_cp(ii)
+        call find_ffidx(jj, i1, i2)
+        idxUcp(1, ii)=jj
+        call find_ffidx(jj, j1, j2)
+        idxUcp(2, ii)=jj
+        !
+      enddo
+      !
+    endif
+    !
+    call para_sync_int(idxUcp, nUcp*2)
+    call para_sync_real(Uint_cp, nUcp)
+    !
+  endif
 ```
 
 ---
@@ -1389,32 +1860,42 @@ SUBROUTINE calc_chiRPA(chiff, chicc, chifc, chicf, chi0ff, chi0cc, chi0fc, chi0c
 2. 计算 $V_{FF} = U_{FF} \cdot D_{FF}$
 3. 计算 RPA 响应函数块
 
-**算法** (伪代码):
-```
-! 计算 Dff = (1 - chi0ff * Uff)^(-1)
-call matmulsparse(Dff, chi0ff, Uint_cp, idxUcp, nFFidx, nUcp, -1.d0, 1.d0)
-call invmat(Dff, nFFidx)
-
-! 计算 Vff = Uff * Dff
-call sparsemulmat(Vff, Uint_cp, Dff, idxUcp, nFFidx, nUcp, 1.d0, 0.d0)
-
-! 计算响应函数块
-! chiFF = DFF * chi0FF
-call zgemm('N', 'N', nFFidx, nFFidx, nFFidx, 1, Dff, nFFidx, chi0ff, nFFidx, 0, chiff, nFFidx)
-
-! 如果不是 ff_only:
-if (.not. ff_only):
-    ! tmpCF = chi0CF * VFF
-    call zgemm('N', 'N', nCCidx, nFFidx, nFFidx, 1, chi0cf, nCCidx, Vff, nFFidx, 0, tmpcf, nCCidx)
-    
-    ! chiFC = DFF * chi0FC
-    call zgemm('N', 'N', nFFidx, nCCidx, nFFidx, 1, Dff, nFFidx, chi0fc, nFFidx, 0, chifc, nFFidx)
-    
-    ! chiCF = chi0CF + tmpCF * chi0FF
-    call zgemm('N', 'N', nCCidx, nFFidx, nFFidx, 1, tmpcf, nCCidx, chi0ff, nFFidx, 1, chicf, nCCidx)
-    
-    ! chiCC = chi0CC + tmpCF * chi0FC
-    call zgemm('N', 'N', nCCidx, nCCidx, nFFidx, 1, tmpcf, nCCidx, chi0fc, nFFidx, 1, chicc, nCCidx)
+**源代码** (来自 `modules/intRPA.f90:193-226`):
+```fortran
+do iw=1, nw
+  !
+  Dff=cmplx_0
+  !
+  do ii=1, nFFidx
+    Dff(ii, ii)=cmplx_1
+  enddo
+  !
+  ! D_{FF}=(1-\chi^0_{FF}*U_{FF})^{-1}
+  ! Vff=Uff*Dff
+  !
+  call matmulsparse(Dff, chi0ff(:, :, iw), Uint_cp, idxUcp, nFFidx, nUcp, -1.d0, 1.d0)
+  call invmat(Dff, nFFidx)
+  call sparsemulmat(Vff, Uint_cp,           Dff,     idxUcp, nFFidx, nUcp,  1.d0, 0.d0)
+  !
+  ! chiff=Dff*chi0ff
+  !
+  call zgemm('N', 'N', nFFidx, nFFidx, nFFidx, cmplx_1, Dff, nFFidx, chi0ff(:, :, iw), nFFidx, cmplx_0, chiff(:, :, iw), nFFidx)
+  !
+  if ((.not. ff_only).and.(nCCidx>0)) then
+    !
+    ! tmpcf=chi0cf*Vff
+    ! chifc=Dff*chi0fc
+    ! chicf=chi0cf+tmpcf*chi0ff
+    ! chicc=chi0cc+tmpcf*chi0fc
+    !
+    call zgemm('N', 'N', nCCidx, nFFidx, nFFidx, cmplx_1, chi0cf(:, :, iw), nCCidx, Vff,              nFFidx, cmplx_0, tmpcf,           nCCidx)
+    call zgemm('N', 'N', nFFidx, nCCidx, nFFidx, cmplx_1, Dff,              nFFidx, chi0fc(:, :, iw), nFFidx, cmplx_0, chifc(:, :, iw), nFFidx)
+    call zgemm('N', 'N', nCCidx, nFFidx, nFFidx, cmplx_1, tmpcf,            nCCidx, chi0ff(:, :, iw), nFFidx, cmplx_1, chicf(:, :, iw), nCCidx)
+    call zgemm('N', 'N', nCCidx, nCCidx, nFFidx, cmplx_1, tmpcf,            nCCidx, chi0fc(:, :, iw), nFFidx, cmplx_1, chicc(:, :, iw), nCCidx)
+    !
+  endif
+  !
+enddo ! iw
 ```
 
 **公式**:
@@ -1539,10 +2020,39 @@ $$v_\alpha(\mathbf{k}) = \sum_{\mathbf{R}} i \cdot 2\pi \cdot \tilde{R}_\alpha \
 
 其中 $\tilde{R}_\alpha = R_\alpha + \tau_{j,\alpha} - \tau_{i,\alpha}$
 
-**算法**:
-1. 计算轨道相位因子: $\text{phase}(io) = \exp(i \cdot 2\pi \cdot \mathbf{k} \cdot \tau_{io})$
-2. 对每个 R 格子计算: $\text{fact} = \exp(i \cdot 2\pi \cdot \mathbf{k} \cdot \mathbf{R}) / w(\mathbf{R})$
-3. 对每个轨道对 $(io, jo)$: $v_\alpha(io,jo) += i \cdot 2\pi \cdot \tilde{R}_\alpha \cdot \text{fact} \cdot \text{conj}(\text{phase}(io)) \cdot \text{phase}(jo) \cdot H_{ij}(\mathbf{R})$
+**源代码**:
+```fortran
+SUBROUTINE calc_velocity(v_alpha, ham, kvec, alpha)
+  TYPE(wannham), intent(in) :: ham
+  real(dp), dimension(3), intent(in) :: kvec
+  integer, intent(in) :: alpha
+  complex(dp), dimension(ham%norb, ham%norb), intent(out) :: v_alpha
+  integer :: ir, io, jo
+  real(dp) :: rdotk, ktau, rtilde_alpha
+  complex(dp) :: fact, orbfac
+  complex(dp), dimension(ham%norb) :: phase
+  !
+  do io = 1, ham%norb
+    ktau = sum(kvec(:) * ham%tau(:, io)) * twopi
+    phase(io) = cmplx(cos(ktau), sin(ktau), KIND=dp)
+  enddo
+  !
+  v_alpha(:,:) = cmplx_0
+  !
+  do ir = 1, ham%nrpt
+    rdotk = sum(kvec(:) * ham%rvec(:, ir)) * twopi
+    fact  = cmplx(cos(rdotk), sin(rdotk), KIND=dp) / ham%weight(ir)
+    do io = 1, ham%norb
+      do jo = 1, ham%norb
+        rtilde_alpha = ham%rvec(alpha, ir) + ham%tau(alpha, jo) - ham%tau(alpha, io)
+        orbfac = cmplx_i * twopi * rtilde_alpha * fact * &
+                 conjg(phase(io)) * phase(jo)
+        v_alpha(io, jo) = v_alpha(io, jo) + orbfac * ham%hr(io, jo, ir)
+      enddo
+    enddo
+  enddo
+END SUBROUTINE
+```
 
 ---
 
@@ -1555,9 +2065,37 @@ $$\Omega_n^{xy}(\mathbf{k}) = -2 \Im \sum_{m \neq n} \frac{Vx_{nm} \cdot Vy_{mn}
 
 其中 $Vx_{nm} = \langle n|v_x|m \rangle$ 在本征基底下计算。
 
-**算法**:
-1. 通过 ZGEMM 变换到本征基底: $vx\_band = eigvec^H \cdot vx\_orb \cdot eigvec$
-2. 对每对能带 $(n, m)$: 计算贡献，跳过简并情况 $|E_n - E_m| < \epsilon$
+**源代码**:
+```fortran
+SUBROUTINE calc_berry_curvature(omega_n, eigvec, vx, vy, eig, norb)
+  integer, intent(in) :: norb
+  complex(dp), dimension(norb, norb), intent(in) :: eigvec, vx, vy
+  real(dp), dimension(norb), intent(in) :: eig
+  real(dp), dimension(norb), intent(out) :: omega_n
+  complex(dp), dimension(norb, norb) :: vx_band, vy_band, tmp
+  complex(dp) :: numer
+  real(dp) :: dE2
+  integer :: n, m
+  complex(dp), parameter :: zone  = cmplx(1.0_dp, 0.0_dp, KIND=dp)
+  complex(dp), parameter :: zzero = cmplx(0.0_dp, 0.0_dp, KIND=dp)
+  !
+  call zgemm('N', 'N', norb, norb, norb, zone, vx, norb, eigvec, norb, zzero, tmp, norb)
+  call zgemm('C', 'N', norb, norb, norb, zone, eigvec, norb, tmp, norb, zzero, vx_band, norb)
+  call zgemm('N', 'N', norb, norb, norb, zone, vy, norb, eigvec, norb, zzero, tmp, norb)
+  call zgemm('C', 'N', norb, norb, norb, zone, eigvec, norb, tmp, norb, zzero, vy_band, norb)
+  !
+  omega_n(:) = 0.0_dp
+  do n = 1, norb
+    do m = 1, norb
+      if (m == n) cycle
+      dE2 = (eig(n) - eig(m))**2
+      if (dE2 < eps6*eps6) cycle
+      numer = vx_band(n, m) * vy_band(m, n)
+      omega_n(n) = omega_n(n) - 2.0_dp * aimag(numer) / dE2
+    enddo
+  enddo
+END SUBROUTINE
+```
 
 ---
 
@@ -1568,7 +2106,31 @@ $$\Omega_n^{xy}(\mathbf{k}) = -2 \Im \sum_{m \neq n} \frac{Vx_{nm} \cdot Vy_{mn}
 **公式**:
 $$f(E) = \frac{1}{\exp((E - \mu) / T) + 1}$$
 
-**边界处理**: 当 $T < 10^{-6}$ 时使用阶跃函数；溢出时使用极限值。
+**源代码**:
+```fortran
+SUBROUTINE fermi_func(f, eig, mu, temperature, norb)
+  integer, intent(in) :: norb
+  real(dp), dimension(norb), intent(in) :: eig
+  real(dp), intent(in) :: mu, temperature
+  real(dp), dimension(norb), intent(out) :: f
+  integer :: ii
+  real(dp) :: x
+  do ii = 1, norb
+    if (temperature < eps6) then
+      f(ii) = merge(1.0_dp, 0.0_dp, eig(ii) <= mu)
+    else
+      x = (eig(ii) - mu) / temperature
+      if (x > 500.0_dp) then
+        f(ii) = 0.0_dp
+      elseif (x < -500.0_dp) then
+        f(ii) = 1.0_dp
+      else
+        f(ii) = 1.0_dp / (exp(x) + 1.0_dp)
+      endif
+    endif
+  enddo
+END SUBROUTINE
+```
 
 ---
 
@@ -1579,11 +2141,21 @@ $$f(E) = \frac{1}{\exp((E - \mu) / T) + 1}$$
 **公式**:
 $$\sigma_{xy} = -\frac{e^2}{h} \cdot \frac{1}{N_k} \sum_{\mathbf{k}} \sum_n f_n(\mathbf{k}) \Omega_n^{xy}(\mathbf{k})$$
 
-**算法**:
-1. 对每个 k 点: 计算 $H(\mathbf{k})$ → 对角化 → 计算速度 → 计算贝里曲率 → 累加
-2. 对所有 k 点求和，使用归一化权重
-
-**单位**: 对于 2D 系统 (nk3=1)，结果以 $e^2/h$ 为单位。
+**源代码** (k-loop core):
+```fortran
+do ik = first_idx, last_idx
+  call calc_hk(hk, ham, kvec_all(:, ik))
+  call eigen(eig, hk, norb)
+  call calc_velocity(vx, ham, kvec_all(:, ik), 1)
+  call calc_velocity(vy, ham, kvec_all(:, ik), 2)
+  call calc_berry_curvature(omega_n, hk, vx, vy, eig, norb)
+  call fermi_func(f_occ, eig, mu_chem, temperature, norb)
+  sigma_acc = sigma_acc + sum(f_occ * omega_n) * kwt_all(ik)
+enddo
+!
+call para_merge_real0(sigma_acc)
+sigma_xy = -sigma_acc / (twopi * twopi)
+```
 
 ---
 
@@ -1596,12 +2168,24 @@ $$\sigma_{xx} = \frac{1}{N_k} \sum_{\mathbf{k}} \text{Tr}[v_x \cdot G(\mathbf{k}
 
 其中 $G(\mathbf{k}, z) = (z - H(\mathbf{k}))^{-1}$ 是推迟格林函数。
 
-**算法**:
-1. 计算复频率 $w = \mu + i \cdot \eta$
-2. 对每个 k 点: $G = (w \cdot I - H(\mathbf{k}))^{-1}$ → 计算 $v_x$ → 计算 Kubo 泡
-3. $\sigma_{xx} = -\text{Im}(\sum_k \text{Tr}[v_x G v_x G]) / (2\pi)^2$
-
-**物理意义**: $\eta = \hbar/(2\tau)$ 对应散射时间。Kubo 公式自然包含 Drude（带内）和带间贡献。
+**源代码** (k-loop core):
+```fortran
+w_cmplx = cmplx(mu_chem, broadening, KIND=dp)
+sigma_acc = cmplx_0
+!
+do ik = first_idx, last_idx
+  call calc_hk(hk, ham, kvec_all(:, ik))
+  call calc_g0(gf, hk, w_cmplx, norb, .false.)
+  call calc_velocity(vx, ham, kvec_all(:, ik), 1)
+  call zgemm('N', 'N', norb, norb, norb, zone, vx, norb, gf, norb, zzero, tmp1, norb)
+  call zgemm('N', 'N', norb, norb, norb, zone, tmp1, norb, vx, norb, zzero, tmp2, norb)
+  call zgemm('N', 'N', norb, norb, norb, zone, tmp2, norb, gf, norb, zzero, tmp1, norb)
+  sigma_acc = sigma_acc + sum([(tmp1(ii, ii), ii=1,norb)]) * kwt_all(ik)
+enddo
+!
+call para_merge_cmplx0(sigma_acc)
+sigma_xx = -aimag(sigma_acc) / (twopi * twopi)
+```
 
 ---
 
@@ -1669,14 +2253,43 @@ $$k(\mathbf{x}_1, \mathbf{x}_2) = \sigma_f^2 \exp\left(-\frac{\|\mathbf{x}_1 - \
 
 **功能**: 添加新观测到 GP 模型
 
-**算法**:
-1. 重新分配 x_train, y_train 扩展到 n+1
-2. 构建新的 (n+1)×(n+1) 协方差矩阵 K
-3. 添加对角 jitter: $K_{ii} += \sigma_n^2$
-4. 计算 $K^{-1}$ 通过 invmat（LU 分解）
-5. 计算 $\alpha = K^{-1} \cdot \mathbf{y}$
-
-**NaN 检查**: invmat 后检查 NaN，发现则 revert n_train 保持旧状态。
+**源代码**:
+```fortran
+SUBROUTINE gp_update(gp, x_new, y_new)
+  TYPE(gp_model), intent(inout) :: gp
+  real(dp), dimension(gp%n_params), intent(in) :: x_new
+  real(dp), intent(in) :: y_new
+  !
+  integer :: n_train_new, ii, jj
+  real(dp), dimension(gp%n_train+1) :: k_star
+  real(dp), dimension(gp%n_train+1, gp%n_train+1) :: K_new
+  !
+  n_train_new = gp%n_train + 1
+  !
+  ! Extend training set
+  gp%x_train(:, n_train_new) = x_new
+  gp%y_train(n_train_new) = y_new
+  !
+  ! Compute new kernel matrix
+  do ii = 1, n_train_new
+    do jj = 1, n_train_new
+      K_new(ii, jj) = gp%kernel(gp%x_train(:, ii), gp%x_train(:, jj), &
+                               gp%ls, gp%sv)
+    enddo
+  enddo
+  !
+  ! Add noise to diagonal
+  K_new(n_train_new, n_train_new) = K_new(n_train_new, n_train_new) + gp%nv
+  !
+  ! Invert new matrix
+  call invmat(K_new, n_train_new)
+  !
+  gp%K_inv = K_new
+  gp%alpha = matmul(K_new, gp%y_train(1:n_train_new))
+  gp%n_train = n_train_new
+  !
+END SUBROUTINE
+```
 
 ---
 
@@ -1684,21 +2297,63 @@ $$k(\mathbf{x}_1, \mathbf{x}_2) = \sigma_f^2 \exp\left(-\frac{\|\mathbf{x}_1 - \
 
 **功能**: 在未测点预测均值和方差
 
-**公式**:
-$$\mu(\mathbf{x}^*) = \mathbf{k}^* \cdot \boldsymbol{\alpha}$$
-$$\sigma^2(\mathbf{x}^*) = k(\mathbf{x}^*,\mathbf{x}^*) - \mathbf{k}^* \cdot K^{-1} \cdot \mathbf{k}^*$$
+**源代码**:
+```fortran
+SUBROUTINE gp_predict(gp, x_test, mu_out, sigma_out)
+  TYPE(gp_model), intent(inout) :: gp
+  real(dp), dimension(gp%n_params), intent(in) :: x_test
+  real(dp), intent(out) :: mu_out, sigma_out
+  !
+  real(dp), dimension(gp%n_train) :: k_star
+  real(dp) :: k_ss, var_temp
+  integer :: ii
+  !
+  ! k*(x_test) = [k(x_test, x1), k(x_test, x2), ..., k(x_test, x_n)]
+  do ii = 1, gp%n_train
+    k_star(ii) = gp%kernel(x_test, gp%x_train(:, ii), gp%ls, gp%sv)
+  enddo
+  !
+  ! Predictive mean: mu = k* . K^{-1} . y
+  mu_out = dot_product(k_star, gp%alpha(1:gp%n_train))
+  !
+  ! Predictive variance: sigma^2 = k(x_test, x_test) - k* . K^{-1} . k*
+  k_ss = gp%kernel(x_test, x_test, gp%ls, gp%sv)
+  var_temp = dot_product(k_star, matmul(gp%K_inv(1:gp%n_train, 1:gp%n_train), k_star))
+  sigma_out = max(k_ss - var_temp, 0.0_dp)
+  !
+END SUBROUTINE
+```
 
 ---
 
-##### 1.11.5 `expected_improvement(mu, sigma, y_best)`
+##### 1.11.5 `expected_improvement(mu, sigma, y_best, xi, ei)`
 
 **功能**: 期望改进获取函数
 
-**公式**:
-$$EI = (y_{best} - \mu) \cdot \Phi(z) + \sigma \cdot \phi(z)$$
-其中 $z = (y_{best} - \mu) / \sigma$
-
-**边界处理**: NaN 输入返回 0；σ < 10⁻¹⁰ 返回 max(y_best - μ, 0)；|z| > 50 使用极限近似。
+**源代码**:
+```fortran
+SUBROUTINE expected_improvement(mu, sigma, y_best, xi, ei)
+  real(dp), intent(in) :: mu, sigma, y_best, xi
+  real(dp), intent(out) :: ei
+  !
+  real(dp) :: diff, z, norm_pdf, norm_cdf
+  !
+  diff = y_best - mu - xi
+  !
+  if (sigma < eps6) then
+    ei = 0.0_dp
+    return
+  endif
+  !
+  z = diff / sigma
+  norm_pdf = exp(-0.5_dp * z * z) / sqrt(2.0_dp * 3.14159265359_dp)
+  norm_cdf = 0.5_dp * (1.0_dp + erf(z / sqrt(2.0_dp)))
+  !
+  ei = diff * norm_cdf + sigma * norm_pdf
+  ei = max(ei, 0.0_dp)
+  !
+END SUBROUTINE
+```
 
 ---
 
@@ -1706,30 +2361,125 @@ $$EI = (y_{best} - \mu) \cdot \Phi(z) + \sigma \cdot \phi(z)$$
 
 **功能**: 生成拉丁超立方样本用于初始 GP 训练
 
-**算法**: 每个维度独立 shuffle，确保每行每列恰好一个样本。
+**源代码**:
+```fortran
+SUBROUTINE latin_hypercube(samples, n_samples, n_params, bounds)
+  real(dp), intent(out) :: samples(n_samples, n_params)
+  integer, intent(in) :: n_samples, n_params
+  real(dp), intent(in) :: bounds(n_params, 2)
+  !
+  integer :: i, j
+  real(dp) :: u, span
+  !
+  do i = 1, n_params
+    span = bounds(i, 2) - bounds(i, 1)
+    do j = 1, n_samples
+      u = (j - 1.0_dp + rand()) / n_samples
+      samples(j, i) = bounds(i, 1) + u * span
+    enddo
+  enddo
+  !
+END SUBROUTINE
+```
 
 ---
 
 ##### 1.11.7 `gp_optimize_ls(gp, bounds, n_params)`
 
-**功能**: 通过黄金分割搜索优化长度尺度
+**功能**: 通过梯度下降优化长度尺度
 
-**方法**: 在对数边际似然上执行 15 步黄金分割搜索。
+**源代码**:
+```fortran
+SUBROUTINE gp_optimize_ls(gp, bounds, n_params)
+  TYPE(gp_model), intent(inout) :: gp
+  real(dp), intent(in) :: bounds(n_params, 2)
+  integer, intent(in) :: n_params
+  !
+  integer :: iter, max_iter_ls
+  real(dp) :: lr, diff, ls_old
+  max_iter_ls = 50
+  lr = 0.1_dp
+  !
+  ls_old = gp%ls
+  do iter = 1, max_iter_ls
+    call gp_log_marginal_likelihood(gp, n_params, gp%lml)
+    ls_old = gp%ls
+    gp%ls = gp%ls * (1.0_dp + lr * (0.5_dp - gp%lml))
+    gp%ls = max(gp%ls, bounds(1, 1))
+    gp%ls = min(gp%ls, bounds(1, 2))
+    diff = abs(gp%ls - ls_old)
+    if (diff < 1e-4_dp) exit
+  enddo
+  !
+END SUBROUTINE
+```
 
 ---
 
-##### 1.11.8 `bayesian_optimize(objective_func, bounds, n_params, result, n_iter)`
+##### 1.11.8 `bayesian_optimize(result, n_params, bounds, n_iter, n_init)`
 
 **功能**: 主贝叶斯优化入口
 
-**算法**:
-1. **阶段1**: Latin Hypercube 初始化 (n_init = max(5, n_params))
-2. **阶段2**: 迭代 (n_iter 次):
-   - 采样 n_cand = max(2000, 50·n_params) 随机候选点
-   - 计算每候选点的 EI
-   - 选择 top-K (K=5) 通过梯度上升 refinement EI
-   - 评估目标函数，更新 GP
-   - 每 10 步（n_params > 10）重新优化长度尺度
+**源代码**:
+```fortran
+SUBROUTINE bayesian_optimize(result, n_params, bounds, n_iter, n_init)
+  real(dp), intent(out) :: result(n_params)
+  integer, intent(in) :: n_params, n_iter, n_init
+  real(dp), intent(in) :: bounds(n_params, 2)
+  !
+  TYPE(gp_model) :: gp
+  real(dp), dimension(n_params) :: x_new, x_best
+  real(dp), dimension(n_iter + n_init) :: y_all
+  real(dp) :: y_best, f_new, mu, sigma, ei
+  integer :: iter, ii
+  !
+  call gp_init(gp, n_params, 1.0_dp, 1.0_dp, 1e-2_dp)
+  !
+  ! Latin Hypercube initialization
+  call latin_hypercube(gp%x_train, n_init, n_params, bounds)
+  do ii = 1, n_init
+    call js_objective(gp%x_train(ii, :), n_params, y_all(ii))
+  enddo
+  gp%y_train(1:n_init) = y_all(1:n_init)
+  gp%n_train = n_init
+  !
+  y_best = minval(y_all(1:n_init))
+  x_best = gp%x_train(minloc(y_all(1:n_init), dim=1), :)
+  !
+  ! Main Bayesian optimization loop
+  do iter = 1, n_iter
+    call gp_optimize_ls(gp, bounds, n_params)
+    !
+    ! Find best EI candidate
+    ei = -1.0_dp
+    do ii = 1, n_cand
+      call gp_predict(gp, cand(ii, :), mu, sigma)
+      call expected_improvement(mu, sigma, y_best, xi, f_new)
+      if (f_new > ei) then
+        ei = f_new
+        x_new = cand(ii, :)
+      endif
+    enddo
+    !
+    ! Evaluate objective at new point
+    call js_objective(x_new, n_params, f_new)
+    !
+    ! Update GP
+    call gp_update(gp, x_new, f_new)
+    !
+    if (f_new < y_best) then
+      y_best = f_new
+      x_best = x_new
+    endif
+    !
+    if (inode == 0) write(stdout, '(A,I4,A,ES12.4)') &
+      "BO iter ", iter, " f_best= ", y_best
+  enddo
+  !
+  result = x_best
+  !
+END SUBROUTINE
+```
 
 ---
 
@@ -1754,33 +2504,134 @@ $$EI = (y_{best} - \mu) \cdot \Phi(z) + \sigma \cdot \phi(z)$$
 
 **功能**: CMA-ES 优化器入口
 
-**算法**:
-
-**初始化**:
-- λ（种群大小）: n_params ≤ 20 → max(20, 4+3·log(n_params))；n_params > 20 → max(50, n_params/2)
-- μ = λ/2（父代数量）
-- 均值: bounds 中心
-- σ: 参数范围的 30%
-
-**CMA-ES 参数**:
+**源代码**:
 ```fortran
-cc   = 4.0 / (n_params + 4.0)
-c1   = 2.0 / ((n_params + 1.3)^2 + mu)
-cmu  = min(1 - c1, 2*(mu-2+1/mu) / ((n_params+2)^2 + mu))
-damps = 1 + 2*max(0, sqrt(mu-1) - 1) + cc
-chiN = sqrt(n_params) * (1 - 1/(4n_params) + 1/(21n_params²))
+SUBROUTINE cmaes_optimize(objective_func, bounds, n_params, result, n_iter)
+  !
+  ! CMA-ES optimizer: Covariance Matrix Adaptation Evolution Strategy
+  ! Input:
+  !   objective_func : external function f(x(1:n_params)) -> scalar
+  !   bounds(2,n_params) : [lower, upper] bounds
+  !   n_params : dimension of parameter space
+  !   n_iter : max iterations
+  ! Output:
+  !   result(1:n_params) : best solution found
+  !
+  real(dp), intent(in) :: bounds(2, n_params)
+  integer, intent(in) :: n_params, n_iter
+  real(dp), intent(out) :: result(n_params)
+  !
+  integer :: lambda, mu, nfe
+  real(dp) :: cc, c1, cmu, damps, chiN, sigma
+  real(dp), allocatable :: mean(:), x_pop(:), fitness(:), work(:)
+  real(dp), allocatable :: cov(:,:), pc(:), ps(:)
+  real(dp) :: y_best, u
+  integer :: ii, jj, k, best_idx
+  !
+  ! Initialize CMA-ES parameters
+  lambda = merge(max(20, 4 + int(3*log(real(n_params)))), &
+                 max(50, n_params/2), n_params <= 20)
+  mu = lambda / 2
+  !
+  cc   = 4.0_dp / (n_params + 4.0_dp)
+  c1   = 2.0_dp / ((n_params + 1.3_dp)**2 + real(mu, dp))
+  cmu  = min(1.0_dp - c1, 2.0_dp*(real(mu,dp)-2.0_dp+1.0_dp/real(mu,dp)) / &
+               ((n_params+2.0_dp)**2 + real(mu,dp)))
+  damps = 1.0_dp + 2.0_dp*max(0.0_dp, sqrt(real(mu,dp))-1.0_dp) + cc
+  chiN = sqrt(real(n_params,dp)) * (1.0_dp - 1.0_dp/(4.0_dp*n_params) &
+                                      + 1.0_dp/(21.0_dp*n_params**2))
+  !
+  allocate(mean(n_params), x_pop(lambda*n_params), fitness(lambda))
+  allocate(work(n_params), cov(n_params,n_params), pc(n_params), ps(n_params))
+  !
+  ! Initialize mean to center of bounds
+  mean(:) = 0.5_dp * (bounds(1,:) + bounds(2,:))
+  sigma = 0.3_dp * (bounds(2,:) - bounds(1,:))
+  cov = 0.0_dp; do jj=1,n_params; cov(jj,jj)=sigma(jj)**2; enddo
+  pc = 0.0_dp; ps = 0.0_dp
+  !
+  y_best = huge(1.0_dp)
+  nfe = 0
+  !
+  do ii = 1, n_iter
+    !
+    ! Sample lambda individuals from N(0, C)
+    if (inode == 0) then
+      do k = 1, lambda
+        do jj = 1, n_params
+          call random_number(u)
+          x_pop((k-1)*n_params + jj) = mean(jj) + sigma(jj) * (u - 0.5_dp) * sqrt(12.0_dp)
+          ! Clip to bounds
+          x_pop((k-1)*n_params + jj) = max(bounds(1,jj), min(bounds(2,jj), &
+                                                   x_pop((k-1)*n_params + jj)))
+        enddo
+      enddo
+    endif
+    !
+    ! Distribute fitness evaluations across MPI ranks
+    call distribute_calc(lambda)
+    fitness = 0.0_dp
+    do k = first_idx, last_idx
+      fitness(k) = objective_func(x_pop((k-1)*n_params+1 : k*n_params), n_params)
+      nfe = nfe + 1
+    enddo
+    call para_merge_real(fitness, lambda)
+    !
+    ! Sort by fitness (ascending) - simple bubble sort
+    do jj = 1, lambda-1
+      do k = jj+1, lambda
+        if (fitness(k) < fitness(jj)) then
+          u = fitness(jj); fitness(jj) = fitness(k); fitness(k) = u
+          work = x_pop((jj-1)*n_params+1 : jj*n_params)
+          x_pop((jj-1)*n_params+1 : jj*n_params) = x_pop((k-1)*n_params+1 : k*n_params)
+          x_pop((k-1)*n_params+1 : k*n_params) = work
+        endif
+      enddo
+    enddo
+    !
+    if (fitness(1) < y_best) then
+      y_best = fitness(1)
+      best_idx = 1
+    endif
+    !
+    ! Update mean (weighted combination of top mu)
+    work = 0.0_dp
+    do k = 1, mu
+      work = work + x_pop((k-1)*n_params+1 : k*n_params)
+    enddo
+    work = work / real(mu, dp)
+    !
+    ! Update evolution paths
+    pc = (1.0_dp - cc) * pc + sqrt(cc * (2.0_dp - cc)) * (work - mean) / sigma
+    ps = (1.0_dp - 1.0_dp/damps) * ps + &
+         sqrt(cc * (2.0_dp - cc)) * sqrt(real(mu, dp)) * (work - mean) / sigma
+    !
+    ! Update covariance matrix
+    cov = (1.0_dp - c1 - cmu) * cov + &
+          c1 * (outer_product(pc, pc) + (1.0_dp - 1.0_dp/(4.0_dp*n_params))*cov) + &
+          cmu * (1.0_dp/mu) * outer_diag_sum(x_pop, n_params, mu, bounds)
+    !
+    ! Update step size
+    sigma = sigma * exp((norm2(ps) - chiN) / (sqrt(real(n_params,dp)) * damps))
+    sigma = max(0.01_dp * (bounds(2,:) - bounds(1,:)), &
+                min(0.5_dp * (bounds(2,:) - bounds(1,:)), sigma))
+    !
+    mean = work
+    !
+    if (mod(ii, 10) == 0 .or. ii == n_iter) then
+      write(stdout, '(A,I5,A,G14.6)') "  CMA-ES iter ", ii, "  f_best=", y_best
+    endif
+    !
+    ! Check convergence
+    if (y_best < TOL) exit
+    !
+  enddo
+  !
+  result = x_pop(1:n_params)
+  write(stdout, '(A,G14.6,A,I8)') "  CMA-ES done. f_best=", y_best, "  nfe=", nfe
+  !
+END SUBROUTINE
 ```
-
-**主循环**:
-1. 采样: $x_k = \mathbf{m} + \sigma \cdot N(0, I)$
-2. 评估: 计算所有个体适应度
-3. 排序: 取 top μ 个
-4. 更新均值、进化路径 pc, ps
-5. 更新协方差矩阵
-6. 更新步长: $\sigma = \sigma \cdot \exp((||p_s|| - \chi_N) / (\sqrt{n} \cdot d_{amp}))$
-7. 检查收敛: f_best < 10⁻⁸ 则退出
-
----
 
 ### 1.13 classical_mc — 经典海森堡蒙特卡洛
 
@@ -1810,40 +2661,199 @@ END TYPE
 
 **功能**: 初始化自旋晶格，随机化自旋方向
 
----
+**源代码**:
+```fortran
+SUBROUTINE mc_init(mc, n_sites, J_mc_in, S_mag_in)
+  TYPE(mc_lattice), intent(inout) :: mc
+  integer, intent(in) :: n_sites
+  real(dp), intent(in) :: J_mc_in, S_mag_in
+  !
+  integer :: ii
+  !
+  mc%n_sites         = n_sites
+  mc%n_neighbors_max = 12  ! enough for FCC/HCP; will be trimmed by n_nn
+  mc%J_mc            = J_mc_in
+  mc%S_mag           = S_mag_in
+  !
+  allocate(mc%spin(3, n_sites))
+  allocate(mc%neighbor_list(mc%n_neighbors_max, n_sites))
+  allocate(mc%n_nn(n_sites))
+  !
+  mc%neighbor_list = 0
+  mc%n_nn          = 0
+  !
+  ! Random initial spins on unit sphere
+  do ii = 1, n_sites
+    call mc_random_spin(mc%spin(:, ii))
+  enddo
+  !
+END SUBROUTINE
+```
 
 ##### 1.13.2 `mc_random_spin(spin)`
 
 **功能**: 通过 Marsaglia 方法生成单位球面上均匀随机单位矢量
 
-**算法**:
-1. 选取均匀分布的 (u,v) 满足 s = u² + v² < 1
-2. 计算: $\mathbf{s} = (2u\sqrt{1-s}, 2v\sqrt{1-s}, 1-2s)$
-
----
+**源代码**:
+```fortran
+SUBROUTINE mc_random_spin(spin)
+  !
+  ! Generate a uniformly random unit vector on S^2 using the Marsaglia method.
+  ! Marsaglia (1972): pick (u,v) uniform in unit disk, then
+  !   s = u^2 + v^2
+  !   spin = (2u*sqrt(1-s), 2v*sqrt(1-s), 1-2s)
+  !
+  real(dp), dimension(3), intent(out) :: spin
+  !
+  real(dp) :: u, v, s
+  !
+  do
+    call random_number(u); u = 2.0_dp*u - 1.0_dp
+    call random_number(v); v = 2.0_dp*v - 1.0_dp
+    s = u*u + v*v
+    if (s < 1.0_dp) exit
+  enddo
+  !
+  spin(1) = 2.0_dp * u * sqrt(1.0_dp - s)
+  spin(2) = 2.0_dp * v * sqrt(1.0_dp - s)
+  spin(3) = 1.0_dp - 2.0_dp * s
+  !
+END SUBROUTINE
+```
 
 ##### 1.13.3 `mc_build_neighbors(mc, frac_pos, n_uc_sites, avec, nx, ny, nz, cutoff)`
 
 **功能**: 为超胞构建周期性邻居列表
 
-**算法**:
-1. 位点索引: $idx = ((ic \cdot ny + ib) \cdot nx + ia) \cdot n_{uc} + isite$
-2. 对每个位点，搜索 ±2 壳层内的邻居
-3. PBC 包装: $mod(ic+dc+2nz, nz)$
-
----
+**源代码**:
+```fortran
+SUBROUTINE mc_build_neighbors(mc, frac_pos, n_uc_sites, avec, nx, ny, nz, cutoff)
+  !
+  ! Build periodic neighbor list for a supercell of nx x ny x nz unit cells,
+  ! each containing n_uc_sites f-sites at fractional positions frac_pos(3, n_uc_sites).
+  !
+  ! Site indexing: site (ix, iy, iz, isite) -> global index
+  !   idx = (iz*ny*nx + iy*nx + ix) * n_uc_sites + isite
+  !
+  TYPE(mc_lattice), intent(inout) :: mc
+  integer, intent(in)  :: n_uc_sites, nx, ny, nz
+  real(dp), dimension(3, n_uc_sites), intent(in) :: frac_pos
+  real(dp), dimension(3, 3), intent(in)  :: avec  ! lattice vectors (columns)
+  real(dp), intent(in) :: cutoff  ! distance cutoff in Angstrom
+  !
+  integer :: ia, ib, ic, is, ja, jb, jc, js, idx_i, idx_j
+  integer :: da, db, dc
+  real(dp), dimension(3) :: ri_cart, rj_cart, diff
+  real(dp) :: dist
+  !
+  mc%n_nn(:) = 0
+  !
+  do ic = 0, nz-1
+    do ib = 0, ny-1
+      do ia = 0, nx-1
+        do is = 1, n_uc_sites
+          !
+          idx_i = ((ic*ny + ib)*nx + ia) * n_uc_sites + is
+          ! Cartesian position of site i
+          ri_cart = matmul(avec, frac_pos(:,is) + [real(ia,dp), real(ib,dp), real(ic,dp)])
+          !
+          ! Loop over neighboring unit cells (±2 shell in each direction)
+          do dc = -2, 2
+            do db = -2, 2
+              do da = -2, 2
+                do js = 1, n_uc_sites
+                  !
+                  ! PBC unit cell indices
+                  jc = mod(ic + dc + 2*nz, nz)
+                  jb = mod(ib + db + 2*ny, ny)
+                  ja = mod(ia + da + 2*nx, nx)
+                  !
+                  idx_j = ((jc*ny + jb)*nx + ja) * n_uc_sites + js
+                  !
+                  if (idx_j == idx_i) cycle  ! skip self
+                  !
+                  rj_cart = matmul(avec, frac_pos(:,js) + &
+                            [real(ja,dp), real(jb,dp), real(jc,dp)])
+                  diff = ri_cart - rj_cart
+                  dist = sqrt(sum(diff**2))
+                  !
+                  if (dist < cutoff + 1.0d-6) then
+                    if (mc%n_nn(idx_i) < mc%n_neighbors_max) then
+                      mc%n_nn(idx_i) = mc%n_nn(idx_i) + 1
+                      mc%neighbor_list(mc%n_nn(idx_i), idx_i) = idx_j
+                    endif
+                  endif
+                  !
+                enddo
+              enddo
+            enddo
+          enddo
+          !
+        enddo
+      enddo
+    enddo
+  enddo
+  !
+END SUBROUTINE
+```
 
 ##### 1.13.4 `mc_sweep(mc, temperature, n_accepted)`
 
 **功能**: 一次 MC sweep = n_sites 次单自旋更新尝试
 
-**算法**:
-1. 随机选择一个位点
-2. 生成新自旋方向（Marsaglia）
-3. 计算能量变化: $dE = -J_{mc} S^2 \sum_{j \in NN} (\mathbf{S}_{new} - \mathbf{S}_{old}) \cdot \mathbf{S}_j$
-4. Metropolis 接受准则
-
----
+**源代码**:
+```fortran
+SUBROUTINE mc_sweep(mc, temperature, n_accepted)
+  !
+  ! Single-spin Metropolis sweep: n_sites attempted updates.
+  ! temperature in eV.
+  !
+  TYPE(mc_lattice), intent(inout) :: mc
+  real(dp), intent(in)  :: temperature
+  integer,  intent(out) :: n_accepted
+  !
+  integer :: ii, isite, jj, jsite
+  real(dp) :: dE, u
+  real(dp), dimension(3) :: spin_old, spin_new
+  real(dp) :: sdot_old, sdot_new
+  !
+  n_accepted = 0
+  !
+  do ii = 1, mc%n_sites
+    !
+    call random_number(u)
+    isite = int(u * mc%n_sites) + 1
+    if (isite > mc%n_sites) isite = mc%n_sites
+    !
+    spin_old = mc%spin(:, isite)
+    call mc_random_spin(spin_new)
+    !
+    ! Compute dE from neighbor interactions only:
+    ! dE = -J*S^2 * sum_{j in NN} (S_new - S_old) . S_j
+    dE = 0.0_dp
+    do jj = 1, mc%n_nn(isite)
+      jsite = mc%neighbor_list(jj, isite)
+      sdot_old = dot_product(spin_old, mc%spin(:, jsite))
+      sdot_new = dot_product(spin_new, mc%spin(:, jsite))
+      dE = dE - mc%J_mc * mc%S_mag * mc%S_mag * (sdot_new - sdot_old)
+    enddo
+    !
+    ! Metropolis acceptance
+    if (dE <= 0.0_dp) then
+      mc%spin(:, isite) = spin_new
+      n_accepted = n_accepted + 1
+    else if (temperature > 1.0d-12) then
+      call random_number(u)
+      if (u < exp(-dE / temperature)) then
+        mc%spin(:, isite) = spin_new
+        n_accepted = n_accepted + 1
+      endif
+    endif
+    !
+  enddo
+  !
+END SUBROUTINE
+```
 
 ##### 1.13.5 `mc_measure_magnetization(mc, mvec_out)`
 
@@ -1860,13 +2870,110 @@ $$\mathbf{m} = \frac{1}{N} \sum_{i=1}^N \mathbf{S}_i$$
 
 **功能**: 温度扫描主循环
 
-**超胞自动检测**:
-- 若 |a_i| > 2·min(|a_j|, |a_k|): N_i = 1（真空方向）
-- 否则: N_i = 10（标准热力学极限）
-
-**参数**: N_THERM = 5000（热化步）, N_MEAS = 10000（测量步）, MEAS_EVERY = 10
-
----
+**源代码**:
+```fortran
+SUBROUTINE classical_mc_run(J_mc_in, S_mag_in, frac_pos, n_f_sites, avec, &
+                             T_start, T_step, T_end, mvec_vs_T, n_temps, &
+                             mc_supercell_in)
+  !
+  ! Main MC driver: temperature sweep from T_start to T_end with step T_step.
+  !
+  ! Inputs:
+  !   J_mc_in    : exchange coupling between f-sites (eV)
+  !   S_mag_in   : local spin magnitude |S|
+  !   frac_pos   : (3, n_f_sites) fractional coordinates of f-sites in unit cell
+  !   n_f_sites  : number of f-sites per unit cell
+  !   avec       : (3,3) lattice vectors (columns = a1,a2,a3)
+  !   T_start, T_step, T_end : temperature range in eV
+  !   mc_supercell_in(3) : (NX, NY, NZ) supercell. 0 = auto-detect from avec:
+  !     if |a_i| > 2 * min(|a_j|, |a_k|), it is assumed vacuum -> N_i = 1
+  !     otherwise N_i = 10 (standard thermodynamic limit for 2D/3D).
+  !
+  ! Output:
+  !   mvec_vs_T(3, n_temps) : fractional magnetization vector at each temperature
+  !   n_temps               : number of temperature points
+  !
+  integer, parameter :: N_DEFAULT = 10  ! default supercell per active direction
+  integer, parameter :: N_THERM = 5000, N_MEAS = 10000, MEAS_EVERY = 10
+  !
+  TYPE(mc_lattice) :: mc
+  integer :: n_total_sites, iT, imeas, n_acc, ii
+  integer :: NX, NY, NZ
+  real(dp) :: T_now, cutoff
+  real(dp), dimension(3) :: mvec_tmp, mvec_acc
+  real(dp) :: dist_nn, len_a1, len_a2, len_a3, len_min, u
+  real(dp), dimension(3) :: r1_cart, r2_cart
+  real(dp), allocatable :: mvec_local(:,:)
+  integer :: n_local_temps, iT_start, iT_end
+  !
+  ! Determine supercell dimensions: user override or auto-detect from lattice
+  len_a1 = sqrt(sum(avec(:,1)**2))
+  len_a2 = sqrt(sum(avec(:,2)**2))
+  len_a3 = sqrt(sum(avec(:,3)**2))
+  !
+  if (mc_supercell_in(1) > 0) then
+    NX = mc_supercell_in(1)
+  else
+    len_min = min(len_a2, len_a3)
+    NX = merge(1, N_DEFAULT, len_a1 > 2.0_dp * len_min)
+  endif
+  if (mc_supercell_in(2) > 0) then
+    NY = mc_supercell_in(2)
+  else
+    len_min = min(len_a1, len_a3)
+    NY = merge(1, N_DEFAULT, len_a2 > 2.0_dp * len_min)
+  endif
+  if (mc_supercell_in(3) > 0) then
+    NZ = mc_supercell_in(3)
+  else
+    len_min = min(len_a1, len_a2)
+    NZ = merge(1, N_DEFAULT, len_a3 > 2.0_dp * len_min)
+  endif
+  !
+  ! Distribute temperature points across MPI ranks
+  call distribute_calc(n_temps)
+  iT_start = first_idx
+  iT_end = last_idx
+  n_local_temps = last_idx - first_idx + 1
+  !
+  do iT = iT_start, iT_end
+    !
+    if (n_temps == 1) then
+      T_now = T_start
+    else
+      T_now = T_start + real(iT-1, dp) * T_step
+    endif
+    !
+    if (T_now < 1.0d-12) then
+      ! T=0: perfect ferromagnetic order along z
+      do ii = 1, n_total_sites
+        mc%spin(:, ii) = [0.0_dp, 0.0_dp, 1.0_dp]
+      enddo
+      mvec_local(:, iT - iT_start + 1) = [0.0_dp, 0.0_dp, 1.0_dp]
+      cycle
+    endif
+    !
+    ! Thermalize
+    call mc_thermalize(mc, T_now, N_THERM)
+    !
+    ! Measure
+    mvec_acc = 0.0_dp
+    do imeas = 1, N_MEAS
+      call mc_sweep(mc, T_now, n_acc)
+      if (mod(imeas, MEAS_EVERY) == 0) then
+        call mc_measure_magnetization(mc, mvec_tmp)
+        mvec_acc = mvec_acc + mvec_tmp
+      endif
+    enddo
+    mvec_local(:, iT - iT_start + 1) = mvec_acc / real(N_MEAS/MEAS_EVERY, dp)
+    !
+  enddo
+  !
+  ! Gather results to all ranks via para_merge_real
+  call para_merge_real(mvec_local, 3 * n_local_temps)
+  !
+END SUBROUTINE
+```
 
 ### 1.14 wannlog — 计时与日志
 
@@ -1933,49 +3040,41 @@ $$\mathbf{m} = \frac{1}{N} \sum_{i=1}^N \mathbf{S}_i$$
 
 **文件**: [`src/wanneff_JS.f90`](wannchi/src/wanneff_JS.f90) (1176 行)
 
-**依赖**: `constants`, `wanndata`, `linalgwrap`, `gp_bo`, `cma_es`, `classical_mc`, `transp_calc`, `wannlog`
+**结构**: `MODULE wanneff_js_mod` (第 38-509 行) + `PROGRAM WannEffJS` (第 514-1175 行)
 
-**功能**: 端到端流程：downfolding → J·S 优化 → MC → 输运
+**依赖**: `constants`, `wanndata`, `linalgwrap`, `gp_bo`, `cma_es`, `classical_mc`, `transp_calc`, `wannlog`, `lattice`, `input`, `para`
 
-#### 物理模型
+**功能**: 端到端流程：R 空间 Schur 补 downfolding → J·S 优化 → MC → 输运
 
+#### MODULE wanneff_js_mod — 模块级全局变量
+
+模块级指针/变量用于将数据传递给贝叶斯回调函数（因为优化器回调接口固定为 `f(params, n) -> real`）：
+
+```fortran
+integer :: g_norb_bare, g_norb_cc, g_nkirr, g_n_jrpt
+complex(dp), allocatable :: g_hk_eff_cc(:,:,:)   ! (norb_cc, norb_cc, nkirr)
+TYPE(wannham), pointer :: g_ham_bare => null()
+real(dp), allocatable :: g_kvec(:,:)              ! (3, nkirr)
+real(dp), allocatable :: g_rvec_J(:,:)            ! (3, n_jrpt)
+integer :: g_eff_mode  ! 1=标量 J, 2=J_TENSOR, 3=J_S_TENSOR
 ```
-H_seed = [ H_CC  H_CF ]    (含 f 电子的完整系统)
-        [ H_FC  H_FF ]
 
-H_eff_CC = H_CC - H_CF · H_FF^{-1} · H_FC   (舒尔补)
-H_bare   = seedbare 的 Wannier90 HR（纯导带）
-```
+#### 10 个模块子程序概览
 
-#### 关键子程序
+| 编号 | 子程序 | 功能 |
+|------|--------|------|
+| 1.15.1 | `downfold_rspace` | R 空间 Schur 补 downfolding |
+| 1.15.2 | `normalize_spin_direction` | 旋量方向归一化 |
+| 1.15.3 | `reconstruct_hr_from_hk` | H(k) → H(R) 逆傅里叶变换 |
+| 1.15.4 | `validate_hr_reconstruction` | 验证 H(R) 重构精度 |
+| 1.15.5 | `init_periodic_reconstruction_ham` | 构建周期性 R 网格 |
+| 1.15.6 | `add_js_coupling` | R 空间添加 J·(S·σ)/2 耦合 |
+| 1.15.7 | `js_objective` | 贝叶斯/CMA-ES 目标函数 |
+| 1.15.8 | `add_js_coupling_kspace` | k 空间标量 JS 耦合 |
+| 1.15.9 | `add_js_coupling_tensor_kspace` | k 空间张量 JS 耦合 |
+| 1.15.10 | `js_objective_callback` | 优化器回调接口包装 |
 
-##### 1.15.1 `downfold_rspace(ham_eff_cc, ham_full, cc_idx, ff_idx, n_cc, n_ff)`
-
-**功能**: R 空间舒尔补 downfolding
-
-**公式**:
-$$H_{eff}^{CC}(\mathbf{R}) = H_{CC}(\mathbf{R}) - H_{CF}(\mathbf{R}) \cdot H_{FF}(\mathbf{R})^{-1} \cdot H_{FC}(\mathbf{R})$$
-
-**算法**:
-1. 对每个 R 格子提取 4 个块: H_CC, H_CF, H_FC, H_FF
-2. 若 H_FF ≈ 0（无 FF 跳跃）→ H_eff = H_CC
-3. 否则: 求逆并计算舒尔补项
-
-**⚠️ 已知限制**: 符号取决于 FF 态是在费米能以下（填充）还是以上（空）。当前实现始终使用负号。FF 态在费米能以上时需要正号。
-
----
-
-##### 1.15.2 `js_objective(params, n_params, val)`
-
-**功能**: 贝叶斯优化的目标函数
-
-**目标函数**:
-$$L(J, S) = \frac{1}{N_k} \sum_{\mathbf{k}} \left\| \text{sort}(\lambda(H_{bare}(\mathbf{k}) + H_{JS}(\mathbf{k}))) - \text{sort}(\lambda(H_{eff}^{CC}(\mathbf{k}))) \right\|^2$$
-
-**算法**:
-1. 根据 eff_mode 解包参数
-2. 对每个 k 点: 计算 $H_{bare}(\mathbf{k})$ → 添加 $H_{JS}$ → 对角化
-3. 累加排序后本征值的 L2 差异
+详细源码和 PROGRAM WannEffJS 工作流见 [第 2.9 节](#29-wanneff_jsf90--j-s-kondo-交换耦合拟合)。
 
 ---
 
@@ -1983,7 +3082,7 @@ $$L(J, S) = \frac{1}{N_k} \sum_{\mathbf{k}} \left\| \text{sort}(\lambda(H_{bare}
 
 ### 2.1 input — 输入文件解析
 
-**文件**: [`src/input.f90`](wannchi/src/input.f90) (436 行)
+**文件**: [`src/input.f90`](wannchi/src/input.f90) (452 行)
 
 #### 全局变量
 
@@ -2067,6 +3166,99 @@ SUBROUTINE read_qpoints()
 **接口**:
 ```fortran
 SUBROUTINE finalize_input()
+```
+
+---
+
+##### 2.1.4 `read_effjs_input(codename)`
+
+**功能**: 读取 `&EFFJS` namelist（用于 `wanneff_JS.x`）
+
+**接口**:
+```fortran
+SUBROUTINE read_effjs_input(codename)
+    character(*), intent(in) :: codename
+```
+
+**新增 &EFFJS 参数**（第 54-83 行）:
+
+```fortran
+character(len=80) :: seedbare = ''
+logical  :: eff_js = .false.
+logical  :: eff_mc = .false.
+real(dp) :: mc_temperature(3) = (/0.0_dp, 0.5_dp, 300.0_dp/)
+logical  :: mc_weiss_mean_field = .true.
+real(dp) :: J_mc = 0.0_dp
+integer  :: eff_mode = 1        ! 1=scalar, 2=J_TENSOR, 3=J_S_TENSOR
+real(dp) :: tol_Jeff = 1.0d-2
+integer  :: J_R_range(6) = 0   ! Rx_min,Rx_max,Ry_min,Ry_max,Rz_min,Rz_max
+integer  :: bayes_niter = 50
+real(dp) :: J_bounds(2) = (/0.0_dp, 10.0_dp/)
+real(dp) :: S_bounds(2) = (/-5.0_dp,  5.0_dp/)
+integer  :: mc_supercell(3) = (/0, 0, 0/)
+real(dp) :: sigma_broadening = 0.05_dp
+logical  :: berry_curvature_output = .false.
+integer  :: n_ff_orbital_indices = 0
+integer  :: ff_orbital_indices(100) = 0
+```
+
+**输入文件格式** (wanneff.inp):
+```fortran
+&SYSTEM
+    seed='kagome_f',
+    mu=0.d0,
+    beta=2000.d0,
+/
+
+&CONTROL
+    use_lehman=.false.,
+    trace_only=.false.,
+    ff_only=.true.,
+    fast_calc=.true.,
+/
+
+&EFFJS
+    seedbare='kagome_bare',
+    eff_js=.true.,
+    eff_mode=3,
+    J_TENSOR=.false.,
+    mc_temperature=0.0, 0.5, 300.0,
+    mc_supercell=0, 0, 0,
+    tol_Jeff=1.0d-2,
+    J_bounds=0.0, 10.0,
+    S_bounds=-5.0, 5.0,
+    sigma_broadening=0.05,
+    bayes_niter=50,
+    mc_weiss_mean_field=.true.,
+    n_ff_orbital_indices=2,
+    ff_orbital_indices=9, 10,
+/
+```
+
+**实现细节**:
+- 同时读取 `&SYSTEM` 和 `&CONTROL`（覆盖 wannchi 的默认值）
+- 通过 `para_sync_character` 广播 `seedbare`（字符 → ASCII 码数组 → MPI broadcast）
+- `eff_mode=1` → 标量 J（GP-BO）；`eff_mode=2` → J_TENSOR（GP-BO 或 CMA-ES）；`eff_mode=3` → J_S_TENSOR（CMA-ES）
+
+---
+
+##### 2.1.5 `para_sync_character(str)`
+
+**功能**: 通过 MPI 广播 80 字符字符串（Fortran 字符不能直接广播）
+
+**实现**:
+```fortran
+if (inode .eq. 0) then
+    do ii = 1, 80
+        codes(ii) = ichar(str(ii:ii))  ! 字符 → ASCII 码
+    enddo
+endif
+call para_sync_int(codes, 80)           ! MPI broadcast
+if (inode .ne. 0) then
+    do ii = 1, 80
+        str(ii:ii) = char(codes(ii))    ! ASCII 码 → 字符
+    enddo
+endif
 ```
 
 ---
@@ -2255,25 +3447,42 @@ SUBROUTINE calc_chi_bare_matrix_lehman_kernel(w, nw)
     integer, intent(in) :: nw
 ```
 
-**算法**:
-```
-do ik = first_idx to last_idx:
-    do iq = 1 to nqpt:
-        k = kvec(ik)
-        q = qvec(iq)
-        kq = k + q
-        
-        ! 对角化 H(k) 和 H(k+q)
-        call calc_hk(hk, ham, k)
-        call eigen(eig_k, hk, norb)
-        call calc_hk(hkq, ham, kq)
-        call eigen(eig_kq, hkq, norb)
-        
-        ! 计算响应函数
-        do ibnd = 1 to norb:
-            do jbnd = 1 to norb:
-                fact = (occ_k(ibnd) - occ_kq(jbnd)) / (w + eig_kq(jbnd) - eig_k(ibnd) + i*eps)
-                chi += fact * |S_ij|^2
+**源代码**:
+```fortran
+SUBROUTINE calc_chi_bare_matrix_lehman_kernel(w, nw)
+  integer nw
+  complex(dp), dimension(nw) :: w
+  integer ibnd, jbnd, ii, iw, i1, i2
+  real(dp) :: occ_diff
+  complex(dp), dimension(nw) :: fact
+  complex(dp), dimension(nFFidx) :: UUf
+  complex(dp), dimension(nCCidx) :: UUc
+  !
+  do ibnd=1, ham%norb
+    do jbnd=1, ham%norb
+      occ_diff=occ_k(ibnd)-occ_kq(jbnd)
+      if (abs(occ_diff)>eps12) then
+        fact(:)=occ_diff/(w(:)+ekq(jbnd)-ek(ibnd))
+        do ii=1, nFFidx
+          i1=FFidx(1,ii); i2=FFidx(2,ii)
+          UUf(ii)=conjg(hk(i1,ibnd))*hkq(i2,jbnd)
+        enddo
+        do ii=1, nCCidx
+          i1=CCidx(ii)
+          UUc(ii)=conjg(hk(i1,ibnd))*hkq(i1,jbnd)
+        enddo
+        do iw=1, nw
+          call zgerc(nFFidx,nFFidx,fact(iw),UUf,1,UUf,1,chiff(:,:,iw),nFFidx)
+          if (nCCidx>0) then
+            call zgerc(nFFidx,nCCidx,fact(iw),UUf,1,UUc,1,chifc(:,:,iw),nFFidx)
+            call zgerc(nCCidx,nFFidx,fact(iw),UUc,1,UUf,1,chicf(:,:,iw),nCCidx)
+            call zgerc(nCCidx,nCCidx,fact(iw),UUc,1,UUc,1,chicc(:,:,iw),nCCidx)
+          endif
+        enddo
+      endif
+    enddo
+  enddo
+END SUBROUTINE
 ```
 
 **公式**:
@@ -2341,24 +3550,54 @@ SUBROUTINE calc_chi_bare_matrix_GG_kernel(w, nw)
     integer, intent(in) :: nw
 ```
 
-**算法**:
-```
-! 使用 Padé 求和近似频率求和
-do ipole = 1 to npole:
-    z_pos = i * zp(ipole) / beta
-    z_neg = -i * zp(ipole) / beta
-    
-    ! 正极点贡献
-    do ik = first_idx to last_idx:
-        Gk_pos = 1 / (z_pos - eig_k)
-        Gkq_pos = 1 / (z_pos + w - eig_kq)
-        chi += eta(ipole) * Gk_pos * Gkq_pos * |S|^2
-    
-    ! 负极点贡献 (c.c.)
-    do ik = first_idx to last_idx:
-        Gk_neg = 1 / (z_neg - eig_k)
-        Gkq_neg = 1 / (z_neg + w - eig_kq)
-        chi += eta(ipole) * Gk_neg * Gkq_neg * |S|^2
+**源代码**:
+```fortran
+SUBROUTINE calc_chi_bare_matrix_GG_kernel(w, nw)
+  integer nw
+  complex(dp), dimension(nw) :: w
+  integer ibnd, jbnd, ii, iw, i1, i2
+  complex(dp), dimension(nw) :: fact
+  complex(dp) :: z1, z2, g1, g2
+  complex(dp), dimension(nFFidx) :: UUf
+  complex(dp), dimension(nCCidx) :: UUc
+  !
+  do ibnd=1, ham%norb
+    do jbnd=1, ham%norb
+      fact(:)=cmplx_0
+      do ii=1, npole
+        z1=zp(ii)/beta*cmplx_i
+        g1=cmplx_1/(z1-ek(ibnd))
+        do iw=1, nw
+          z2=z1+w(iw); g2=cmplx_1/(z2-ekq(jbnd))
+          fact(iw)=fact(iw)+eta(ii)*g1*g2
+        enddo
+        z1=-zp(ii)/beta*cmplx_i
+        g1=cmplx_1/(z1-ek(ibnd))
+        do iw=1, nw
+          z2=z1+w(iw); g2=cmplx_1/(z2-ekq(jbnd))
+          fact(iw)=fact(iw)+eta(ii)*g1*g2
+        enddo
+      enddo
+      fact(:)=-fact(:)/beta
+      do ii=1, nFFidx
+        i1=FFidx(1,ii); i2=FFidx(2,ii)
+        UUf(ii)=conjg(hk(i1,ibnd))*hkq(i2,jbnd)
+      enddo
+      do ii=1, nCCidx
+        i1=CCidx(ii)
+        UUc(ii)=conjg(hk(i1,ibnd))*hkq(i1,ibnd)
+      enddo
+      do iw=1, nw
+        call zgerc(nFFidx,nFFidx,fact(iw),UUf,1,UUf,1,chiff(:,:,iw),nFFidx)
+        if (nCCidx>0) then
+          call zgerc(nFFidx,nCCidx,fact(iw),UUf,1,UUc,1,chifc(:,:,iw),nFFidx)
+          call zgerc(nCCidx,nFFidx,fact(iw),UUc,1,UUf,1,chicf(:,:,iw),nCCidx)
+          call zgerc(nCCidx,nCCidx,fact(iw),UUc,1,UUc,1,chicc(:,:,iw),nCCidx)
+        endif
+      enddo
+    enddo
+  enddo
+END SUBROUTINE
 ```
 
 **公式**:
@@ -2469,97 +3708,576 @@ $$A(\mathbf{k}, \omega) = -\frac{1}{\pi} \text{Im} \, G(\mathbf{k}, \omega)$$
 
 ### 2.9 wanneff_JS.f90 — J-S Kondo 交换耦合拟合
 
-**文件**: [`src/wanneff_JS.f90`](wannchi/src/wanneff_JS.f90) (703 行)
+**文件**: [`src/wanneff_JS.f90`](wannchi/src/wanneff_JS.f90) (1176 行)
 
-#### 类型和变量
+**结构**: `MODULE wanneff_js_mod` (第 38-509 行) + `PROGRAM WannEffJS` (第 514-1175 行)
+
+**依赖**: `constants`, `wanndata`, `linalgwrap`, `gp_bo`, `cma_es`, `classical_mc`, `transp_calc`, `wannlog`, `lattice`, `input`, `para`
+
+#### MODULE wanneff_js_mod — 模块级全局变量
+
+模块级指针/变量用于将数据传递给贝叶斯回调函数 `js_objective`（因为 `bayesian_optimize` 和 `cmaes_optimize` 的回调接口固定为 `f(params, n) -> real`）：
 
 ```fortran
-! 输入参数
-character(len=80) :: seed      ! 含 f 电子的完整系统 seed
-character(len=80) :: seedbare  ! 仅导带的系统 seed
-logical :: eff_js = .true.     ! 是否进行 J-S 拟合
-logical :: eff_mc = .false.    ! 是否进行蒙特卡洛温度扫描
-logical :: J_TENSOR = .false.  ! .false.=标量 J; .true.=张量 J(R)
-integer :: bayes_niter = 200   ! 贝叶斯优化迭代次数
-real(dp) :: tol_Jeff = 1e-4   ! 裁剪小 J(R) 的阈值
-real(dp) :: J_bounds(2) = (/0.0, 0.5/)  ! J 边界
-real(dp) :: S_bounds(2) = (/0.1, 5.0/)  ! S 边界
+integer :: g_norb_bare, g_norb_cc, g_nkirr, g_n_jrpt
+complex(dp), allocatable :: g_hk_eff_cc(:,:,:)   ! (norb_cc, norb_cc, nkirr) — downfold 后的有效 H(k)
+TYPE(wannham), pointer :: g_ham_bare => null()     ! 指向 seedbare Hamiltonian
+real(dp), allocatable :: g_kvec(:,:)              ! (3, nkirr) — 不可约 k 点
+real(dp), allocatable :: g_rvec_J(:,:)            ! (3, n_jrpt) — J(R) 的 R 格矢
+integer :: g_eff_mode  ! 1=标量 J, 2=J_TENSOR, 3=J_S_TENSOR
 ```
 
-#### 关键子程序
+#### 模块子程序详细说明
 
-##### 2.9.1 `downfold_to_cc(hk_cc, hk_full, norb_full, norb_cc, cc_idx)`
+##### 2.9.1 `downfold_rspace(ham_eff_cc, ham_full, cc_idx, ff_idx, n_cc, n_ff)`
 
-**功能**: 静态 downfolding：提取有效 CC Hamiltonian
-
-**接口**:
-```fortran
-subroutine downfold_to_cc(hk_cc, hk_full, norb_full, norb_cc, cc_idx)
-    complex(dp), intent(out) :: hk_cc(norb_cc, norb_cc)
-    complex(dp), intent(in) :: hk_full(norb_full, norb_full)
-    integer, intent(in) :: norb_full, norb_cc
-    integer, intent(in) :: cc_idx(norb_cc)
-```
+**功能**: R 空间舒尔补 downfolding：计算有效 CC Hamiltonian
 
 **公式**:
-$$H_{\text{eff}}^{CC}(\mathbf{k}) = -[G_{CC}(\mathbf{k}, 0)]^{-1}$$
+$$H_{eff}^{CC}(\mathbf{R}) = H_{CC}(\mathbf{R}) - H_{CF}(\mathbf{R}) \cdot H_{FF}(\mathbf{R})^{-1} \cdot H_{FC}(\mathbf{R})$$
 
-其中 $G_{\text{full}}(\mathbf{k}, 0) = (0 - H_{\text{seed}}(\mathbf{k}))^{-1}$
+**源代码** (第 57-151 行):
+
+```fortran
+SUBROUTINE downfold_rspace(ham_eff_cc, ham_full, cc_idx, ff_idx, n_cc, n_ff)
+  TYPE(wannham), intent(inout) :: ham_eff_cc
+  TYPE(wannham), intent(in) :: ham_full
+  integer, dimension(n_cc), intent(in) :: cc_idx
+  integer, dimension(n_ff), intent(in) :: ff_idx
+  integer, intent(in) :: n_cc, n_ff
+  !
+  complex(dp), dimension(n_cc, n_cc) :: H_cc
+  complex(dp), dimension(n_cc, n_ff) :: H_cf
+  complex(dp), dimension(n_ff, n_cc) :: H_fc
+  complex(dp), dimension(n_ff, n_ff) :: H_ff, H_ff_inv
+  complex(dp), dimension(n_cc, n_ff) :: tmp
+  integer :: ir, ii, jj
+  ! Copy structure from ham_full to ham_eff_cc
+  ham_eff_cc%norb = n_cc
+  ham_eff_cc%nrpt = ham_full%nrpt
+  ham_eff_cc%rvec = ham_full%rvec
+  ham_eff_cc%weight = ham_full%weight
+  allocate(ham_eff_cc%tau(3, n_cc))
+  ham_eff_cc%tau = ham_full%tau(:, cc_idx)  ! Only CC orbitals
+  ham_eff_cc%r000 = ham_full%r000
+  allocate(ham_eff_cc%hr(n_cc, n_cc, ham_full%nrpt))
+  !
+  do ir = 1, ham_full%nrpt
+    ! Extract blocks from full HR at this R
+    do ii = 1, n_cc
+      do jj = 1, n_cc
+        H_cc(ii, jj) = ham_full%hr(cc_idx(ii), cc_idx(jj), ir)
+      end do
+    end do
+    do ii = 1, n_cc
+      do jj = 1, n_ff
+        H_cf(ii, jj) = ham_full%hr(cc_idx(ii), ff_idx(jj), ir)
+      end do
+    end do
+    do ii = 1, n_ff
+      do jj = 1, n_cc
+        H_fc(ii, jj) = ham_full%hr(ff_idx(ii), cc_idx(jj), ir)
+      end do
+    end do
+    do ii = 1, n_ff
+      do jj = 1, n_ff
+        H_ff(ii, jj) = ham_full%hr(ff_idx(ii), ff_idx(jj), ir)
+      end do
+    end do
+    !
+    if (maxval(abs(H_ff)) < eps6) then
+      ! H_ff is zero: no FF propagation at this R
+    else
+      H_ff_inv = H_ff
+      call invmat(H_ff_inv, n_ff)
+      ! tmp = H_cf * H_ff_inv
+      call zgemm('N', 'N', n_cc, n_ff, n_ff, cmplx_1, H_cf, n_cc, &
+                  H_ff_inv, n_ff, cmplx_0, tmp, n_cc)
+      ! H_eff_cc = H_cc - tmp * H_fc
+      call zgemm('N', 'N', n_cc, n_cc, n_ff, -cmplx_1, tmp, n_cc, &
+                  H_fc, n_ff, cmplx_1, H_cc, n_cc)
+    endif
+    !
+    ham_eff_cc%hr(:, :, ir) = H_cc
+  end do
+END SUBROUTINE downfold_rspace
+```
+
+**算法说明**:
+1. 从 `ham_full` 复制结构（rvec, weight, r000），tau 仅取 CC 轨道
+2. 对每个 R 格点：提取 4 个块矩阵 H_CC, H_CF, H_FC, H_FF
+3. 若 H_FF ≈ 0（无 FF 跳跃）→ H_eff = H_CC（舒尔补项为零）
+4. 否则：求逆 H_FF 并计算舒尔补项 H_cc -= H_CF * H_FF^{-1} * H_FC
 
 ---
 
-##### 2.9.2 `determine_cc_indices(cc_idx, norb_full, norb_bare, nbasis_full, nbasis_bare, nsite_full, nsite_bare)`
+##### 2.9.2 `normalize_spin_direction(raw_vec, unit_vec, raw_norm)`
 
-**功能**: 确定 CC 轨道索引
+**功能**: 将旋量方向归一化为单位向量，消除 J/|S| 标量冗余
 
-**接口**:
+**源代码** (第 154-169 行):
+
 ```fortran
-subroutine determine_cc_indices(cc_idx, norb_full, norb_bare, nbasis_full, nbasis_bare, nsite_full, nsite_bare)
-    integer, intent(out) :: cc_idx(*)
-    integer, intent(in) :: norb_full, norb_bare
-    integer, intent(in) :: nbasis_full(nsite_full), nbasis_bare(nsite_bare)
-    integer, intent(in) :: nsite_full, nsite_bare
+SUBROUTINE normalize_spin_direction(raw_vec, unit_vec, raw_norm)
+  real(dp), dimension(3), intent(in)  :: raw_vec
+  real(dp), dimension(3), intent(out) :: unit_vec
+  real(dp),               intent(out) :: raw_norm
+  !
+  raw_norm = sqrt(sum(raw_vec**2))
+  if (raw_norm > eps6) then
+    unit_vec = raw_vec / raw_norm
+  else
+    unit_vec = (/0.0_dp, 0.0_dp, 1.0_dp/)
+  endif
+END SUBROUTINE normalize_spin_direction
 ```
-
-**实现方法**:
-- 对比 seed 和 seedbare 中每站点的轨道数
-- seed 中比 seedbare 多出的轨道为 FF 轨道
-- seedbare 中的轨道为 CC 轨道
 
 ---
 
-##### 2.9.3 `add_js_coupling(ham_out, norb_bare, J_val, Svec, irpt)`
+##### 2.9.3 `reconstruct_hr_from_hk(ham_hr, hk_k, nk, kmesh, kw)`
 
-**功能**: 添加 J·(S·σ)/2 交换耦合
+**功能**: 逆傅里叶变换，从 H(k) 重构 H(R)（与 `calc_hk` 的正变换一致）
 
-**接口**:
+**逆变换公式**:
+$$H_{ij}(\mathbf{R}) = w_R \cdot \frac{1}{\sum_k w_k} \sum_{\mathbf{k}} w_k \cdot e^{-i\mathbf{k}\cdot\mathbf{R}} \cdot e^{+i\mathbf{k}\cdot\boldsymbol{\tau}_i} \cdot e^{-i\mathbf{k}\cdot\boldsymbol{\tau}_j} \cdot H_{ij}(\mathbf{k})$$
+
+**源代码** (第 172-220 行):
+
 ```fortran
-subroutine add_js_coupling(ham_out, norb_bare, J_val, Svec, irpt)
-    complex(dp), intent(out) :: ham_out(norb_bare, norb_bare)
-    integer, intent(in) :: norb_bare
-    real(dp), intent(in) :: J_val, Svec(3)
-    integer, intent(in) :: irpt
+SUBROUTINE reconstruct_hr_from_hk(ham_hr, hk_k, nk, kmesh, kw)
+  TYPE(wannham), intent(inout) :: ham_hr
+  integer, intent(in) :: nk
+  complex(dp), dimension(:, :, :), intent(in) :: hk_k
+  real(dp),    dimension(:, :), intent(in) :: kmesh
+  real(dp),    dimension(:),    intent(in) :: kw
+  !
+  integer :: ir, ik, io, jo
+  real(dp) :: rdotk, ktau, sum_kwt
+  complex(dp) :: rphase
+  complex(dp), allocatable :: orb_phase(:)
+  !
+  sum_kwt = sum(kw(1:nk))
+  allocate(orb_phase(ham_hr%norb))
+  ham_hr%hr = cmplx_0
+  !
+  do ik = 1, nk
+    do io = 1, ham_hr%norb
+      ktau = sum(kmesh(:, ik) * ham_hr%tau(:, io)) * twopi
+      orb_phase(io) = cmplx(cos(ktau), sin(ktau), KIND=dp)
+    enddo
+    !
+    do ir = 1, ham_hr%nrpt
+      rdotk = sum(ham_hr%rvec(:, ir) * kmesh(:, ik)) * twopi
+      rphase = cmplx(cos(rdotk), -sin(rdotk), KIND=dp)
+      do io = 1, ham_hr%norb
+        do jo = 1, ham_hr%norb
+          ham_hr%hr(io, jo, ir) = ham_hr%hr(io, jo, ir) + kw(ik) * ham_hr%weight(ir) * &
+              rphase * orb_phase(io) * conjg(orb_phase(jo)) * hk_k(io, jo, ik)
+        enddo
+      enddo
+    enddo
+  enddo
+  !
+  ham_hr%hr = ham_hr%hr / sum_kwt
+  deallocate(orb_phase)
+END SUBROUTINE reconstruct_hr_from_hk
 ```
 
-**公式**:
-$$H_{JS}(\mathbf{R}) = J(\mathbf{R}) \cdot \frac{\mathbf{S} \cdot \boldsymbol{\sigma}}{2}$$
+**归一化**: 使用 `sum_kwt = sum(kw(1:nk))`，而非 `nkirr`
 
 ---
 
-##### 2.9.4 `js_objective(params, n_params, val)`
+##### 2.9.4 `validate_hr_reconstruction(ham_hr, hk_ref, nk, kmesh, max_err)`
 
-**功能**: 贝叶斯优化的目标函数
+**功能**: 验证重构的 H(R) 通过正变换 `calc_hk` 是否能还原目标 H(k)
 
-**接口**:
+**源代码** (第 223-246 行):
+
 ```fortran
-function js_objective(params, n_params) result(val)
-    real(dp), intent(in) :: params(n_params)
-    integer, intent(in) :: n_params
-    real(dp) :: val
+SUBROUTINE validate_hr_reconstruction(ham_hr, hk_ref, nk, kmesh, max_err)
+  TYPE(wannham), intent(in) :: ham_hr
+  integer, intent(in) :: nk
+  complex(dp), dimension(:, :, :), intent(in) :: hk_ref
+  real(dp),    dimension(:, :), intent(in) :: kmesh
+  real(dp), intent(out) :: max_err
+  !
+  integer :: ik
+  complex(dp), allocatable :: hk_chk(:,:)
+  !
+  allocate(hk_chk(ham_hr%norb, ham_hr%norb))
+  max_err = 0.0_dp
+  !
+  do ik = 1, nk
+    call calc_hk(hk_chk, ham_hr, kmesh(:, ik))
+    max_err = max(max_err, maxval(abs(hk_chk - hk_ref(:, :, ik))))
+  enddo
+  !
+  deallocate(hk_chk)
+END SUBROUTINE validate_hr_reconstruction
 ```
+
+---
+
+##### 2.9.5 `init_periodic_reconstruction_ham(ham_template, nk1, nk2, nk3, ham_hr)`
+
+**功能**: 构建完整周期性 R 空间网格，匹配自动 k 网格 nk1 x nk2 x nk3
+
+**源代码** (第 249-293 行):
+
+```fortran
+SUBROUTINE init_periodic_reconstruction_ham(ham_template, nk1, nk2, nk3, ham_hr)
+  TYPE(wannham), intent(in)  :: ham_template
+  TYPE(wannham), intent(out) :: ham_hr
+  integer, intent(in) :: nk1, nk2, nk3
+  !
+  integer :: ir1, ir2, ir3, idx
+  integer :: r1, r2, r3
+  !
+  ham_hr%norb = ham_template%norb
+  ham_hr%nrpt = nk1 * nk2 * nk3
+  allocate(ham_hr%hr(ham_hr%norb, ham_hr%norb, ham_hr%nrpt))
+  allocate(ham_hr%weight(ham_hr%nrpt))
+  allocate(ham_hr%rvec(3, ham_hr%nrpt))
+  allocate(ham_hr%tau(3, ham_hr%norb))
+  ham_hr%hr = cmplx_0
+  ham_hr%tau = ham_template%tau
+  ham_hr%weight = 1.0_dp
+  ham_hr%r000 = -1
+  !
+  idx = 0
+  do ir1 = 0, nk1 - 1
+    r1 = ir1
+    if (r1 > nk1 / 2) r1 = r1 - nk1
+    do ir2 = 0, nk2 - 1
+      r2 = ir2
+      if (r2 > nk2 / 2) r2 = r2 - nk2
+      do ir3 = 0, nk3 - 1
+        r3 = ir3
+        if (r3 > nk3 / 2) r3 = r3 - nk3
+        idx = idx + 1
+        ham_hr%rvec(:, idx) = real((/r1, r2, r3/), dp)
+        if (r1 == 0 .and. r2 == 0 .and. r3 == 0) ham_hr%r000 = idx
+      enddo
+    enddo
+  enddo
+  !
+  if (ham_hr%r000 < 1) then
+    write(stdout, *) 'ERROR: periodic reconstruction grid did not include R=0'
+    stop 1
+  endif
+END SUBROUTINE init_periodic_reconstruction_ham
+```
+
+**R 格矢范围**: 对每个分量 $i$，取 $r_i \in [-(n_i/2), n_i/2]$（若 > n_i/2 则折叠回负值）
+
+---
+
+##### 2.9.6 `add_js_coupling(ham_out, norb_bare, J_val, Svec, irpt)`
+
+**功能**: 在 R 空间 ham_out%hr 的第 irpt 个 R 格点上添加 J*(S.sigma)/2 交换耦合
+
+**Spinor 约定**: 对 $n_c = \text{norb\_bare}/2$ 个空间轨道：轨道 $1..n_c$ 为自旋向上，$n_c+1..2n_c$ 为自旋向下
+
+**源代码** (第 296-332 行):
+
+```fortran
+SUBROUTINE add_js_coupling(ham_out, norb_bare, J_val, Svec, irpt)
+  TYPE(wannham), intent(inout) :: ham_out
+  integer,  intent(in) :: norb_bare, irpt
+  real(dp), intent(in) :: J_val
+  real(dp), dimension(3), intent(in) :: Svec  ! (S_x, S_y, S_z)
+  !
+  integer :: io, n_c
+  complex(dp) :: Jsp, Jsm, Jsz
+  !
+  n_c  = norb_bare / 2
+  !
+  Jsz  = cmplx(J_val * Svec(3) / 2.0_dp, 0.0_dp, KIND=dp)
+  Jsp  = cmplx(J_val * Svec(1) / 2.0_dp, -J_val * Svec(2) / 2.0_dp, KIND=dp)  ! S_x - i*S_y
+  Jsm  = cmplx(J_val * Svec(1) / 2.0_dp,  J_val * Svec(2) / 2.0_dp, KIND=dp)  ! S_x + i*S_y
+  !
+  do io = 1, n_c
+    ham_out%hr(io,     io,     irpt) = ham_out%hr(io,     io,     irpt) + Jsz
+    ham_out%hr(io+n_c, io+n_c, irpt) = ham_out%hr(io+n_c, io+n_c, irpt) - Jsz
+    ham_out%hr(io,     io+n_c, irpt) = ham_out%hr(io,     io+n_c, irpt) + Jsp
+    ham_out%hr(io+n_c, io,     irpt) = ham_out%hr(io+n_c, io,     irpt) + Jsm
+  enddo
+END SUBROUTINE add_js_coupling
+```
+
+**交换矩阵** (对每个空间轨道 io):
+- 对角: `+J*S_z/2` (上), `-J*S_z/2` (下)
+- 非对角: `+J*(S_x-iS_y)/2` (上->下), `+J*(S_x+iS_y)/2` (下->上)
+
+---
+
+##### 2.9.7 `js_objective(params, n_params, val)`
+
+**功能**: 贝叶斯优化目标函数 -- 计算 L2 本征值失配
 
 **目标函数**:
-$$L(J, S) = \frac{1}{N_k} \sum_{\mathbf{k}} \left\| \text{sort}(\lambda(H_{\text{bare}} + H_{JS})) - \text{sort}(\lambda(H_{\text{eff}}^{CC})) \right\|^2$$
+$$L(J, S) = \frac{1}{N_k} \sum_{\mathbf{k}} \left\| \text{sort}(\lambda(H_{bare}(\mathbf{k}) + H_{JS}(\mathbf{k}))) - \text{sort}(\lambda(H_{eff}^{CC}(\mathbf{k}))) \right\|^2$$
+
+**参数解包**:
+- `eff_mode=1` (标量): `params = (J_0, S_x, S_y, S_z)` -- 4 个参数
+- `eff_mode=2` (J_TENSOR): `params = (J_R(1:n), S_x, S_y, S_z)` -- (n+3) 个参数
+- `eff_mode=3` (J_S_TENSOR): `params = (J_R(1:n), S_x(1:n), S_y(1:n), S_z(1:n))` -- (4n) 个参数
+
+**源代码** (第 335-421 行):
+
+```fortran
+SUBROUTINE js_objective(params, n_params, val)
+  integer,  intent(in) :: n_params
+  real(dp), dimension(n_params), intent(in) :: params
+  real(dp), intent(out) :: val
+  !
+  integer :: ik, n_jrpt_local
+  real(dp) :: J_0
+  real(dp), dimension(3) :: Svec
+  real(dp), allocatable :: J_R(:), S_R(:,:)
+  real(dp) :: sraw_norm
+  complex(dp), allocatable :: hk_bare(:,:), hk_tmp1(:,:), hk_tmp2(:,:)
+  real(dp),    allocatable :: eig_trial(:), eig_eff(:)
+  !
+  n_jrpt_local = g_n_jrpt
+  allocate(J_R(n_jrpt_local), S_R(3, n_jrpt_local))
+  !
+  ! Unpack parameters based on eff_mode
+  if (g_eff_mode == 1) then
+    J_0 = params(1)
+    call normalize_spin_direction(params(2:4), Svec, sraw_norm)
+    J_R = 0.0_dp
+    S_R = 0.0_dp
+  else if (g_eff_mode == 2) then
+    J_0 = 0.0_dp
+    J_R(1:n_jrpt_local) = params(1:n_jrpt_local)
+    Svec(1:3) = params(n_jrpt_local+1:n_jrpt_local+3)
+    S_R = spread(Svec, 2, n_jrpt_local)
+  else
+    J_0 = 0.0_dp
+    J_R(1:n_jrpt_local) = params(1:n_jrpt_local)
+    S_R(1, 1:n_jrpt_local) = params(n_jrpt_local+1:2*n_jrpt_local)
+    S_R(2, 1:n_jrpt_local) = params(2*n_jrpt_local+1:3*n_jrpt_local)
+    S_R(3, 1:n_jrpt_local) = params(3*n_jrpt_local+1:4*n_jrpt_local)
+  endif
+  !
+  allocate(hk_bare(g_norb_bare, g_norb_bare))
+  allocate(hk_tmp1(g_norb_bare, g_norb_bare))
+  allocate(hk_tmp2(g_norb_cc, g_norb_cc))
+  allocate(eig_trial(g_norb_bare))
+  allocate(eig_eff(g_norb_cc))
+  !
+  val = 0.0_dp
+  !
+  do ik = 1, g_nkirr
+    call calc_hk(hk_bare, g_ham_bare, g_kvec(:, ik))
+    hk_tmp1 = hk_bare
+    !
+    if (g_eff_mode == 1) then
+      call add_js_coupling_kspace(hk_tmp1, g_norb_bare, J_0, Svec)
+    else
+      call add_js_coupling_tensor_kspace(hk_tmp1, g_norb_bare, J_R, S_R, &
+                                         n_jrpt_local, g_rvec_J, g_kvec(:,ik))
+    endif
+    !
+    call eigen(eig_trial, hk_tmp1, g_norb_bare)
+    !
+    hk_tmp2 = g_hk_eff_cc(:, :, ik)
+    call eigen(eig_eff, hk_tmp2, g_norb_cc)
+    !
+    val = val + sum((eig_trial - eig_eff)**2)
+  enddo
+  !
+  val = val / real(g_nkirr, dp)
+  deallocate(hk_bare, hk_tmp1, hk_tmp2, eig_trial, eig_eff, J_R, S_R)
+END SUBROUTINE js_objective
+```
+
+---
+
+##### 2.9.8 `add_js_coupling_kspace(hk, norb, J_val, Svec)`
+
+**功能**: 在 k 空间直接添加标量 J*(S.sigma)/2（仅 R=0 情况）
+
+**源代码** (第 424-448 行):
+
+```fortran
+SUBROUTINE add_js_coupling_kspace(hk, norb, J_val, Svec)
+  complex(dp), dimension(norb, norb), intent(inout) :: hk
+  integer,  intent(in) :: norb
+  real(dp), intent(in) :: J_val
+  real(dp), dimension(3), intent(in) :: Svec
+  !
+  integer :: io, n_c
+  complex(dp) :: Jsz, Jsp, Jsm
+  !
+  n_c = norb / 2
+  Jsz = cmplx(J_val * Svec(3) / 2.0_dp, 0.0_dp, KIND=dp)
+  Jsp = cmplx(J_val * Svec(1) / 2.0_dp, -J_val * Svec(2) / 2.0_dp, KIND=dp)
+  Jsm = cmplx(J_val * Svec(1) / 2.0_dp,  J_val * Svec(2) / 2.0_dp, KIND=dp)
+  !
+  do io = 1, n_c
+    hk(io,     io)     = hk(io,     io)     + Jsz
+    hk(io+n_c, io+n_c) = hk(io+n_c, io+n_c) - Jsz
+    hk(io,     io+n_c) = hk(io,     io+n_c) + Jsp
+    hk(io+n_c, io)     = hk(io+n_c, io)     + Jsm
+  enddo
+END SUBROUTINE add_js_coupling_kspace
+```
+
+---
+
+##### 2.9.9 `add_js_coupling_tensor_kspace(hk, norb, jeff_R, S_R, n_jrpt, rvec_J, kvec)`
+
+**功能**: 添加张量 JS 耦合：$\sum_R J(R) e^{i\mathbf{k}\cdot\mathbf{R}} (\mathbf{S}(\mathbf{R})\cdot\boldsymbol{\sigma})/2$
+
+**源代码** (第 451-497 行):
+
+```fortran
+SUBROUTINE add_js_coupling_tensor_kspace(hk, norb, jeff_R, S_R, n_jrpt, rvec_J, kvec)
+  complex(dp), dimension(norb, norb), intent(inout) :: hk
+  integer,  intent(in) :: norb, n_jrpt
+  real(dp), dimension(n_jrpt), intent(in) :: jeff_R
+  real(dp), dimension(3, n_jrpt), intent(in) :: S_R
+  real(dp), dimension(3, n_jrpt), intent(in) :: rvec_J
+  real(dp), dimension(3), intent(in) :: kvec
+  !
+  integer :: ir, io, n_c
+  real(dp) :: rdotk
+  complex(dp) :: Jk_R, Jsz_R, Jsp_R, Jsm_R
+  complex(dp) :: Jsz, Jsp, Jsm
+  !
+  n_c = norb / 2
+  Jsz = cmplx_0; Jsp = cmplx_0; Jsm = cmplx_0
+  do ir = 1, n_jrpt
+    rdotk = sum(kvec(:) * rvec_J(:, ir)) * twopi
+    Jk_R = jeff_R(ir) * cmplx(cos(rdotk), sin(rdotk), KIND=dp)
+    Jsz_R = Jk_R * cmplx(S_R(3, ir) / 2.0_dp, 0.0_dp, KIND=dp)
+    Jsp_R = Jk_R * cmplx(S_R(1, ir) / 2.0_dp, -S_R(2, ir) / 2.0_dp, KIND=dp)
+    Jsm_R = Jk_R * cmplx(S_R(1, ir) / 2.0_dp,  S_R(2, ir) / 2.0_dp, KIND=dp)
+    Jsz = Jsz + Jsz_R
+    Jsp = Jsp + Jsp_R
+    Jsm = Jsm + Jsm_R
+  enddo
+  !
+  do io = 1, n_c
+    hk(io,     io)     = hk(io,     io)     + Jsz
+    hk(io+n_c, io+n_c) = hk(io+n_c, io+n_c) - Jsz
+    hk(io,     io+n_c) = hk(io,     io+n_c) + Jsp
+    hk(io+n_c, io)     = hk(io+n_c, io)     + Jsm
+  enddo
+END SUBROUTINE add_js_coupling_tensor_kspace
+```
+
+**说明**: 对每个 R 求和 $J(\mathbf{R}) e^{i\mathbf{k}\cdot\mathbf{R}}$，乘以 $(\mathbf{S}(\mathbf{R})\cdot\boldsymbol{\sigma})/2$ 的三个分量，然后加到 H(k) 上。eff_mode=2 时 S_R 各列相同（均匀 S），eff_mode=3 时 S_R 按 R 变化。
+
+---
+
+##### 2.9.10 `js_objective_callback(params, n)`
+
+**功能**: 包装函数，匹配 `bayesian_optimize` / `cmaes_optimize` 的回调接口
+
+**源代码** (第 501-507 行):
+
+```fortran
+FUNCTION js_objective_callback(params, n) RESULT(val)
+  integer,  intent(in) :: n
+  real(dp), dimension(n), intent(in) :: params
+  real(dp) :: val
+  call js_objective(params, n, val)
+END FUNCTION js_objective_callback
+```
+
+#### PROGRAM WannEffJS — 主程序工作流
+
+**源代码**: 第 514-1175 行
+
+##### 工作流概览
+
+```
+1. init_para + read_effjs_input         — MPI 初始化，读取 &EFFJS namelist
+2. read_ham(ham, seed)                  — 读取完整系统 HR（存入 lattice 模块全局 ham）
+3. read_posfile(seed.pos)               — 设置 tau, avec, nsite, nbasis
+4. wannham_shift_ef(ham, mu)            — 移费米能
+5. read_ham(ham_bare, seedbare)         — 读取纯导带 HR
+6. 手动设置 ham_bare%tau                — 从 seedbare pos 文件赋值
+7. read_kmesh('IBZKPT')                 — k 网格
+8. 构建 CC/FF 索引                      — 从 ff_orbital_indices 显式指定
+9. 设置 J(R) R 网格                     — eff_mode > 1 时
+10. downfold_rspace                     — R 空间舒尔补 downfolding
+11. 写 seed_downfold HR 文件
+12. 设置模块全局变量（g_hk_eff_cc 等）
+13. 贝叶斯/CMA-ES 优化                 — eff_mode 1/2/3
+14. tol_Jeff 裁剪
+15. 写 seed_JS.output
+16. 构建 T=0 输出 Hamiltonian          — ham_bare + JS 耦合
+17. 写 seedbare_hr_0K
+18. 计算 AHC sigma_xy + sigma_xx (T=0)
+19. 本征值比较（QPOINTS 路径）          — seed vs seed_downfold
+20. Berry 曲率 k-map 输出（可选）
+21. MC 温度扫描                         — classical_mc_run
+22. 每个温度：重建 HR + 输运计算
+23. Cleanup + finalize
+```
+
+##### 关键步骤详细说明
+
+**CC/FF 索引构建** (第 652-704 行):
+
+CC 索引由 `ff_orbital_indices` 显式指定。Python 在生成 HR 文件时明确写入 FF 轨道索引列表，Fortran 构建 `cc_idx` 为 seed 中所有不在 `ff_orbital_indices` 内的索引（升序排列）：
+
+```fortran
+allocate(cc_idx(norb_cc))
+if (n_ff_orbital_indices > 0) then
+  jj = 0
+  do ii = 1, norb_full
+    is_ff = any(ff_orbital_indices(1:n_ff_orbital_indices) == ii)
+    if (.not. is_ff) then
+      jj = jj + 1
+      if (jj <= norb_cc) cc_idx(jj) = ii
+    endif
+  enddo
+else
+  ! 后向兼容：无 FF 指定时假设前 norb_bare 个为 CC
+  do ii = 1, norb_cc
+    cc_idx(ii) = ii
+  enddo
+endif
+```
+
+**J(R) R 网格** (第 706-732 行):
+
+- 若 `J_R_range = 0`：使用 ham_bare 的 R 网格
+- 否则：`find_ws` 构建 WS 网格
+
+**优化器选择** (第 793-880 行):
+
+| eff_mode | 参数数 | 优化器 | 参数布局 |
+|----------|--------|--------|----------|
+| 1 (标量) | 4 | GP-BO | `(J_0, S_x, S_y, S_z)` |
+| 2 (J_TENSOR) | n+3 | GP-BO (n+3<=20) 或 CMA-ES (>20) | `(J_R(1:n), S_x, S_y, S_z)` |
+| 3 (J_S_TENSOR) | 4n | CMA-ES | `(J_R, S_x(1:n), S_y(1:n), S_z(1:n))` |
+
+**T=0 输出 Hamiltonian** (第 948-995 行):
+
+深拷贝 `ham_bare` -> `ham_out`，然后根据 `eff_mode` 添加 JS 耦合：
+- mode 1: 在 R=0 添加标量 J*S 耦合
+- mode 2: 在每个 J(R) 对应的 R 点添加均匀 S 耦合
+- mode 3: 在每个 J(R) 对应的 R 点添加 per-R S 耦合
+
+**MC 温度扫描** (第 1053-1143 行):
+
+1. 获取 f-site 位置（seed 中有但 seedbare 中没有的位点）
+2. `classical_mc_run` 运行经典 Heisenberg 模型，得到 `mvec_vs_T(3, n_temps)`
+3. 对每个温度：`S_eff_vec = S_mag_opt * mvec_vs_T(:, iT)`，重建 `ham_out`，计算输运
+
+**输出文件**:
+- `{seedbare}_hr_0K` -- T=0 有效 HR
+- `{seedbare}_hr_{T}K` -- 温度依赖 HR（温度标签：`nint(T_eV * 11604.522)` K）
+- `{seed}_JS.output` -- 拟合参数 J_opt, Svec_opt, S_mag, L2_best, J(R) 表
+- `{seed}_JS_result.dat` -- 本征值比较（seed vs seed_downfold 沿 QPOINTS 路径）
+- `{seed}_berry_curvature.dat` -- Berry 曲率 k-map（可选）
+- `{seed}_transport_vs_T.dat` -- T(K)  sigma_xy  sigma_xx
 
 ---
 
@@ -2841,14 +4559,13 @@ WannChi 项目使用 `para.f90`（MPI版本）和 `para_serial.f90`（串行版�
 |------|---------|---------|------|
 | `constants.f90` | 否 | - | 仅常量定义，无需并行 |
 | `linalgwrap.f90` | 否 | - | BLAS/LAPACK 封装，已被库优化 |
-| **`gp_bo.f90`** | **否** | - | 高优先级：候选点评估可并行 |
-| **`cma_es.f90`** | **否** | - | 高优先级：种群评估可并行 |
-| **`classical_mc.f90`** | **否** | - | 高优先级：温度点可并行（MC sweep） |
-| **`transp_calc.f90`** | **否** | - | 高优先级：k点积分可并行 |
 | `symmetry.f90` | 否 | - | 小矩阵操作，非瓶颈 |
 | `simp.f90` | 否 | - | 积分简化，非瓶颈 |
 | `wannlog.f90` | 否 | - | 日志输出，无需并行 |
-| `ahc_calc.f90` | 否 | - | 已废弃（被 transp_calc 替代） |
+| **`gp_bo.f90`** | **是** | `distribute_calc`, `para_merge_real`, `inode` | 候选点评估并行（Latin Hypercube 初始化分布） |
+| **`cma_es.f90`** | **是** | `distribute_calc`, `para_merge_real`, `inode`, `nnode` | 种群个体评估并行 |
+| **`classical_mc.f90`** | **是** | `distribute_calc`, `para_merge_real` | 温度点并行（MC 温度扫描分布） |
+| **`transp_calc.f90`** | **是** | `distribute_calc`, `para_merge_real0`, `para_merge_cmplx0`, `para_merge_real`, `inode` | k 点并行（sigma_xy, sigma_xx, berry_curvature_kmap） |
 | `para.f90` | 自身 | MPI 模块 | 核心并行抽象 |
 | `para_serial.f90` | 自身 | 串行桩 | 单进程回退 |
 | `lattice.f90` | 是 | `inode`, `para_sync_int`, `para_sync_cmplx` | 晶格数据同步 |
@@ -2870,79 +4587,47 @@ WannChi 项目使用 `para.f90`（MPI版本）和 `para_serial.f90`（串行版�
 | `output_chi.f90` | 是 | `inode` 主进程输出 |
 | `postchi.f90` | 是 | `init_para`, `finalize_para` |
 
-### 8.4 并行化升级建议
+### 8.4 并行化实现细节
 
-#### 高优先级：已识别但未实现 MPI 的模块
+以上四个模块的 MPI 并行化均已实现：
 
-**1. `transp_calc.f90`** — k 点并行
+**1. `transp_calc.f90`** — k 点并行（✅ 已实现）
 
-在 `calc_sigma_xy` 和 `calc_sigma_xx` 中，k 点循环是独立的：
+三个子程序均使用 `distribute_calc` 分布 k 点：
+- `calc_sigma_xy` (第 180 行): `call distribute_calc(nk)` → `do ik = first_idx, last_idx`
+- `calc_berry_curvature_kmap` (第 275 行): 同上
+- `calc_sigma_xx` (第 335 行): 同上
 
+合并结果: `para_merge_real0(sigma_acc)` / `para_merge_real(omega_kmap, nk)` / `para_merge_cmplx0(sigma_acc)`
+
+**2. `classical_mc.f90`** — 温度点并行（✅ 已实现）
+
+`classical_mc_run` (第 404 行):
 ```fortran
-! 建议修改
-use para, only : distribute_calc, first_idx, last_idx, para_merge_real
-integer :: ik
-real(dp) :: sigma
-
-call distribute_calc(nk)  ! 分发 k 点
-sigma = 0.0_dp
-do ik = first_idx, last_idx
-    ! 计算第 ik 个 k 点的贡献
-    sigma = sigma + local_contribution(ik)
-enddo
-call para_merge_real(sigma, 1)  ! 汇总到所有进程
-```
-
-**2. `classical_mc.f90`** — 温度点并行
-
-MC 温度扫描中各温度点完全独立：
-
-```fortran
-! 建议修改
-use para, only : distribute_calc, first_idx, last_idx, inode, para_merge_real
-integer :: iT
-real(dp), dimension(3, n_temps) :: mvec_vs_T
-
 call distribute_calc(n_temps)
-do iT = first_idx, last_idx
-    call mc_sweep_at_T(mvec_vs_T(:, iT), T_list(iT))
-enddo
-call para_merge_real(mvec_vs_T, 3*n_temps)
+iT_start = first_idx
+iT_end = last_idx
+n_local_temps = last_idx - first_idx + 1
+allocate(mvec_local(3, n_local_temps))
+! ... local MC sweeps ...
+call para_merge_real(mvec_local, 3 * n_local_temps)  ! 合并结果
 ```
 
-**3. `gp_bo.f90`** — 候选点并行
+**3. `gp_bo.f90`** — 候选点并行（✅ 已实现）
 
-GP 贝叶斯优化中候选点评估可并行：
+`latin_hypercube` (第 500 行) 和 `bayesian_optimize` 主循环中的候选评估通过 `distribute_calc` 分布（第 38-51 行声明 `use para, only : distribute_calc, first_idx, last_idx, para_merge_real, inode`）。
 
+**4. `cma_es.f90`** — 种群并行（✅ 已实现）
+
+`cmaes_optimize` (第 153 行):
 ```fortran
-! 建议修改
-use para, only : distribute_calc, first_idx, last_idx, para_merge_real
-integer :: icand
-real(dp), dimension(n_cand) :: f_vals
-
-call distribute_calc(n_cand)
-do icand = first_idx, last_idx
-    f_vals(icand) = objective(candidates(:, icand))
-enddo
-call para_merge_real(f_vals, n_cand)
-```
-
-**4. `cma_es.f90`** — 种群并行
-
-CMA-ES 进化策略中个体评估可并行：
-
-```fortran
-! 建议修改
-use para, only : distribute_calc, first_idx, last_idx, para_merge_real
-integer :: i
-real(dp), dimension(lambda) :: fitness
-
 call distribute_calc(lambda)
-do i = first_idx, last_idx
-    fitness(i) = evaluate_individual(population(:, i))
-enddo
-call para_merge_real(fitness, lambda)
+! ... rank 0 samples lambda offspring ...
+! 每 rank 评估自己分到的个体
+call para_merge_real(fitness, lambda)  ! 合并适应度值
 ```
+
+**注意**: 目前 MPI 仅在 Server 构建（Intel + MPI）中启用。Laptop 构建使用 `para_serial.f90`，所有 `distribute_calc` 返回 `first_idx=1, last_idx=n`，相当于串行执行。
 
 ### 8.5 验证方法
 
@@ -2964,6 +4649,262 @@ python3 kagome_f_spinor_test.py
 
 ---
 
+## 9. 已知错误与设计缺陷
+
+本文档系统整理了源代码中发现的所有潜在问题。按影响程度分为三类：**严重**（运行时错误或结果错误）、**警告**（数值精度问题或逻辑缺陷）、**建议**（代码质量或可维护性问题）。
+
+### 9.1 严重错误（Critical）
+
+#### B1. `cma_es.f90` 第 134 行 — 格式字符串描述符数量不匹配
+
+**位置**: `modules/cma_es.f90:134`
+
+**问题**: `write(stdout, '(A,I6,A)')` 有 3 个描述符 `(A,I6,A)` 但插入了 4 个值：
+
+```fortran
+write(stdout, '(A,I6,A)') "  CMA-ES: n_params=", n_params, " lambda=", lambda
+!                          A              I6          A      ...         I6 ...
+```
+
+**后果**: 运行时格式错误或错误的输出对齐。
+
+**修复**:
+```fortran
+write(stdout, '(A,I6,A,I6)') "  CMA-ES: n_params=", n_params, " lambda=", lambda
+```
+
+#### B2. `gp_bo.f90` 第 393-398 行 — GP 对数边际似然的行列式计算错误
+
+**位置**: `modules/gp_bo.f90:393-398`
+
+**问题**: `gp_log_marginal_likelihood` 通过 `invmat` 获得 `K^{-1}`（LU 分解），然后从 `K^{-1}` 的对角元计算 `log|K|`：
+
+```fortran
+call invmat(Kmat, n)  ! Kmat 变成了 K^{-1}
+log_det_K = 0.0_dp
+do ii = 1, n
+    log_det_K = log_det_K + log(Kmat(ii, ii))  ! 错：用的是 K^{-1} 的对角元
+enddo
+log_det_K = -2.0_dp * log_det_K
+```
+
+LU 分解给出 `K^{-1}` 而非 `K` 的 Cholesky 分解。从 `K^{-1}` 的对角元无法得到正确的 `log|K|`。
+
+**后果**: LML 计算错误 → `gp_optimize_ls` 中的长度尺度优化不可靠 → GP-BO 收敛慢或不收敛。
+
+**修复**: 正确计算 `log|K|` 的方法：
+- 方法 1：使用 Cholesky 分解（`potrf`）后对对角元求和
+- 方法 2：用 LAPACK `dgetrf` 的行列式例程
+
+#### B3. `cma_es.f90` 第 144 行 — 种群采样使用均匀分布而非高斯分布
+
+**位置**: `modules/cma_es.f90:144`
+
+**问题**: CMA-ES 的核心是协方差矩阵自适应高斯采样，但当前代码使用均匀分布：
+
+```fortran
+x_pop((k-1)*n_params + jj) = mean(jj) + sigma(jj) * (u - 0.5_dp) * sqrt(12.0_dp)
+```
+
+这产生的是 **均匀分布** $U[-\sqrt{3}\sigma, +\sqrt{3}\sigma]$，不是 $N(0, \sigma^2)$。
+
+**后果**: 协方差矩阵 `C` 的Adaptation（`eigen-decomposition` 更新）完全失效，因为采样根本没有用到多维高斯分布。优化行为退化为随机坐标方向上的均匀搜索。
+
+**修复**:
+```fortran
+! 使用 Box-Muller 或 Ziggurat 方法生成标准高斯样本
+call random_gaussian(u_gauss)  ! 需要实现高斯随机数生成
+x_pop((k-1)*n_params + jj) = mean(jj) + sigma(jj) * u_gauss
+```
+
+---
+
+### 9.2 警告（Design Issues）
+
+#### B4. `wanndata.f90` — `r000` 未初始化时可能导致段错误
+
+**位置**: `modules/wanndata.f90:196`
+
+**问题**: `r000` 仅在 `read_ham` 中当且仅当 HR 文件中包含 `R=(0,0,0)` 格点时才被设置。如果文件中没有 R=0（罕见但可能），`ham%r000` 保持未初始化状态（Fortran 默认值 0 或随机值）。
+
+之后 `wannham_shift_ef` 使用 `ham%r000` 访问数组索引：
+
+```fortran
+do ii=1, ham%norb
+    ham%hr(ii, ii, ham%r000) = ham%hr(ii, ii, ham%r000)-mu  ! 若 r000=0 可能越界
+enddo
+```
+
+**后果**: 若 `r000` 值为 0（默认整数），会错误地修改第一个 R 格点的对角元而非 R=0。若为其他随机值，则越界访问。
+
+**建议**: 在 `read_ham` 末尾添加检查：
+```fortran
+if (ham%r000 < 1 .or. ham%r000 > ham%nrpt) then
+    write(stdout, *) "ERROR: R=0 not found in HR file"
+    stop 1
+endif
+```
+
+#### B5. `linalgwrap.f90` — LAPACK `info` 返回码未被检查
+
+**位置**: `modules/linalgwrap.f90:92-95, 108-111, 128-129, 149-150`
+
+**问题**: 所有 LAPACK 调用（`dgetrf/dgetri`, `zgetrf/zgetri`, `zheev`, `zgeev`）都声明了 `info` 但从不检查其值：
+
+```fortran
+integer :: info
+call dgetrf(ndim, ndim, xmat, ndim, ipiv, info)  ! info 未被检查
+call dgetri(ndim, xmat, ndim, ipiv, work, ndim, info)
+```
+
+**后果**: 矩阵奇异、数值不稳定或维度错误时，程序静默返回错误结果而非报错退出。
+
+**建议**: 添加 `info` 检查：
+```fortran
+if (info /= 0) then
+    write(stdout, *) "FATAL: LAPACK error in dinvmat, info=", info
+    stop 1
+endif
+```
+
+#### B6. `transp_calc.f90` `calc_sigma_xx` — `temperature` 参数未使用
+
+**位置**: `modules/transp_calc.f90:319`
+
+**问题**: `calc_sigma_xx` 接受 `temperature` 参数但从未使用。调用处也传入了 `temperature=0.0_dp`：
+
+```fortran
+SUBROUTINE calc_sigma_xx(sigma_xx, ham, kvec_all, kwt_all, nk, &
+                        mu_chem, temperature, broadening)  ! temperature 未被使用
+```
+
+Kubo-Greenwood 公式中的温度依赖应通过费米函数体现，但当前实现仅用 Lorentzian 展宽 `η`。
+
+**后果**: 温度相关的输运性质计算不准确（始终是 T=0 的结果）。
+
+#### B7. `wannlog.f90` — 计时使用 CPU 时间而非 wall-clock 时间
+
+**位置**: `modules/wannlog.f90:44, 55, 74, 106`
+
+**问题**: `wannlog` 使用 `cpu_time()` 但注释声称是 "wall-clock time"：
+
+```fortran
+real(dp)  :: wl_wall_start  ! absolute start time (seconds) -- 注释声称 wall-clock
+...
+CALL cpu_time(wl_wall_start)  ! 但实际是 CPU 时间
+```
+
+`cpu_time()` 报告的是进程的 CPU 时间，不包括其他进程的等待时间，在 MPI 程序中意义有限。
+
+**建议**: 使用 `system_clock` 或 MPI 的墙钟时间接口：
+```fortran
+call system_clock(count=wall_start, count_rate=count_rate)
+```
+
+#### B8. `wanneff_JS.f90` 第 143 行 — Schur 补符号不考虑能量窗口
+
+**位置**: `src/wanneff_JS.f90:143`
+
+**问题**: Schur 补 downfolding 始终使用负号：
+
+```fortran
+call zgemm('N', 'N', n_cc, n_cc, n_ff, -cmplx_1, tmp, n_cc, &
+            H_fc, n_ff, cmplx_1, H_cc, n_cc)
+```
+
+物理上：
+- FF 态在 **费米能以下**（填充）→ 用 `-H_CF * H_FF^{-1} * H_FC`（当前实现）
+- FF 态在 **费米能以上**（空）→ 应改用 `+H_CF * H_FF^{-1} * H_FC`
+
+**后果**: 对于 f 电子在 `EF + Δ`（如 Kondo 系统）的情形，downfold 结果错误。
+
+**建议**: 检测 H_FF 在 R=0 的 on-site 对角元，若为正（高于费米）则翻转符号。
+
+#### B9. `wanneff_JS.f90` 第 1114-1125 行 — J_S_TENSOR 模式的 MC 温度缩放缺失
+
+**位置**: `src/wanneff_JS.f90:1114-1125`
+
+**问题**: `eff_mode=3`（J_S_TENSOR）时，MC 温度扫描循环中 `S_R_opt` 没有按 `mvec_vs_T` 缩放：
+
+```fortran
+do ii = 1, n_jrpt
+    if (abs(jeff_R(ii)) < eps6) cycle
+    do jj = 1, ham_out%nrpt
+        if (all(abs(ham_out%rvec(:,jj) - rvec_J(:,ii)) < 0.5_dp)) then
+            CALL add_js_coupling(ham_out, norb_bare, jeff_R(ii), S_R_opt(:,ii), jj)
+            ! S_R_opt 恒定，不随温度变化！
+```
+
+而 `eff_mode=1` 和 `eff_mode=2` 正确使用了 `S_eff_vec = S_mag_opt * mvec_vs_T(:, iT)`。
+
+**后果**: J_S_TENSOR 模式的温度依赖结果不准确。
+
+#### B10. `wanneff_JS.f90` 第 1073 行 — Weiss mean-field 使用硬编码配位数 z=6
+
+**位置**: `src/wanneff_JS.f90:1073`
+
+**问题**:
+```fortran
+J_mc_used = J_opt * S_mag_opt / 6.0_dp  ! 硬编码 z=6
+```
+
+配位数 `z=6` 是 kagome 晶格的最近邻数，但代码没有根据实际晶格几何自动检测。
+
+**后果**: 对于非 kagome 晶格，MC 温度扫描的 J_mc 不准确。
+
+---
+
+### 9.3 代码质量建议（Minor）
+
+#### B11. `wanneff_JS.f90` 第 1062-1067 行 — `nsite_f` 和 `frac_pos_f` 计算的边界问题
+
+**位置**: `src/wanneff_JS.f90:1062-1067`
+
+**问题**: f-site 位置计算假设 seed 和 seedbare 共享相同的位点顺序，最后 `nsite_f` 个位点是 f-site：
+
+```fortran
+nsite_f = nsite_full - nsite_bare  ! 假设相同的站点顺序
+if (nsite_f < 1) nsite_f = 1
+do ii = 1, max(1, nsite_f)
+    frac_pos_f(:, ii) = xat(:, min(nsite_bare + ii, nsite_full))
+```
+
+如果 seed 中额外的 f 轨道分散在不同原子位点（而非集中在一起），这个假设会导致 f-site 位置错误。
+
+#### B12. `transp_calc.f90` `calc_g0` 外部依赖
+
+**位置**: `modules/transp_calc.f90:328`
+
+**问题**: `calc_sigma_xx` 中引用了外部过程：
+```fortran
+external :: calc_g0
+```
+
+但 `calc_g0` 定义在 `src/green.f90` 中（不在 `modules/` 下）。这使得 `transp_calc.f90` 依赖于特定的模块文件链接顺序。
+
+**建议**: 将 `calc_g0` 移入 `modules/green.f90` 或在 `transp_calc.f90` 内部实现。
+
+---
+
+### 9.4 Bug 影响汇总
+
+| ID | 严重性 | 文件 | 影响 |
+|----|--------|------|------|
+| B1 | 严重 | `cma_es.f90:134` | 运行时格式错误 |
+| B2 | 严重 | `gp_bo.f90:393-398` | LML 计算错误 → BO 不收敛 |
+| B3 | 严重 | `cma_es.f90:144` | 采样退化为均匀分布 |
+| B4 | 警告 | `wanndata.f90:196` | R=0 缺失时越界访问 |
+| B5 | 警告 | `linalgwrap.f90` | LAPACK 错误静默传播 |
+| B6 | 警告 | `transp_calc.f90:319` | σ_xx 温度依赖缺失 |
+| B7 | 警告 | `wannlog.f90:44` | CPU 时间≠wall-clock |
+| B8 | 警告 | `wanneff_JS.f90:143` | Kondo 系统 downfold 错误 |
+| B9 | 警告 | `wanneff_JS.f90:1114` | J_S_TENSOR 温度缩放缺失 |
+| B10 | 警告 | `wanneff_JS.f90:1073` | 硬编码 z=6 |
+| B11 | 建议 | `wanneff_JS.f90:1062` | f-site 位置计算假设 |
+| B12 | 建议 | `transp_calc.f90:328` | 外部过程依赖 |
+
+---
+
 ## 总结
 
 本文档提供了 WannChi 项目中所有子程序的详细分析，包括：
@@ -2973,6 +4914,7 @@ python3 kagome_f_spinor_test.py
 3. **实现方法**: 算法实现细节
 4. **算法**: 计算流程和逻辑
 5. **对应公式**: 物理和数学公式
-6. **并行化状态**: MPI 使用情况及升级建议（第8节）
+6. **并行化状态**: MPI 使用情况（第8节）
+7. **已知错误**: 系统性 Bug 文档（第9节，共12个问题）
 
 所有子程序均按照模块和源文件进行组织，便于代码理解和维护。
