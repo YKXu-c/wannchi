@@ -69,6 +69,7 @@ MODULE input
   integer  :: mc_supercell(3) = (/0, 0, 0/)        ! MC supercell (0 = auto-detect from avec)
   real(dp) :: sigma_broadening = 0.05_dp           ! Lorentzian broadening for sigma_xx (eV)
   logical  :: berry_curvature_output = .false.     ! Write Berry curvature k-map for seed/bare/eff
+  real(dp) :: cma_sigma = 0.0_dp                  ! CMA-ES initial sigma (0 = use default 0.02)
   ! Optional explicit FF orbital indices (for wanneff_JS - CC = all other seed indices)
   ! Fixed size array - use n_ff_orbital_indices to know how many are actually used
   integer, parameter :: max_ff_indices = 100
@@ -80,7 +81,8 @@ MODULE input
                    eff_mode, tol_Jeff, J_R_range,             &
                    bayes_niter, J_bounds, S_bounds, mc_supercell, &
                    sigma_broadening, berry_curvature_output, &
-                   n_ff_orbital_indices, ff_orbital_indices
+                   n_ff_orbital_indices, ff_orbital_indices,  &
+                   cma_sigma
   !
 CONTAINS
   !

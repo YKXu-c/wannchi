@@ -3,68 +3,53 @@
 
 ! ===========================================================================
 ! MODULE cma_es
-!   CMA-ES: Covariance Matrix Adaptation Evolution Strategy
+!   CMA-ES: Covariance Matrix Adaptation Evolution Strategy (Standard)
 !
-!   APPLICABILITY:
-!     - High-dimensional continuous optimization (n_params >= 20)
-!     - Non-convex, multi-modal objective functions
-!     - Black-box optimization without gradient information
-!     - When GP-based BO is too slow or doesn't converge
+!   Standard algorithm: Hansen & Ostermeier, Evolutionary Computation 9(2), 159 (2001)
+!   With: rank-mu update, evolution paths pc (for C) and ps (for sigma),
+!         full covariance matrix, eigendecomposition each generation.
 !
-!   NOT SUITABLE FOR:
-!     - Very low dimensional problems (n_params < 10) - overkill
-!     - Discrete/categorical parameters
-!     - When sample efficiency is critical (population-based, many evaluations)
+!   Sampling: x ~ N(m, sigma^2 * C)
+!     via eigendecomposition C = B * D^2 * B^T
+!     x = m + sigma * B * D * z,  z ~ N(0, I)
 !
-!   Algorithm (simplified axis-parallel version):
-!     1. Initialize mean at center of bounds, sigma ~ 30% of range
-!     2. Sample lambda offspring from axis-aligned Gaussian
-!     3. Evaluate fitness, select top mu parents
-!     4. Update mean, evolution paths (pc, ps)
-!     5. Update step size sigma based on ps norm vs expected
-!     6. Update diagonal covariance via weighted variance of parents
-!     7. Repeat until convergence or max iterations
-!
-!   Key parameters:
-!     - lambda: population size (20-124 for high-dim, depends on n_params)
-!     - mu: number of parents (lambda/2)
-!     - sigma: step size (adapts during evolution)
-!
-!   MPI parallelization:
-!     Population evaluation (lambda individuals) is distributed via distribute_calc.
-!     Works with para_serial.f90 (serial stub) on laptop builds.
+!   Covariance update (full rank):
+!     C = (1-c1-cmu)*C + c1*pc*pc^T + cmu*sum_{i=1..mu} w_i*y_i*y_i^T
 !
 !   References:
-!     - Hansen & Ostermeier, Evolutionary Computation 9(2), 2001
-!     - Hansen et al., JMLR 20, 2019 (review)
+!     - Hansen & Ostermeier, EC 9(2), 159 (2001)
+!     - Hansen et al., JMLR 20, 1 (2019) — review
 ! ===========================================================================
 
 module cma_es
 
-use constants, only : stdout, dp
-use para,     only : distribute_calc, first_idx, last_idx, para_merge_real, inode, nnode
+  use constants, only : stdout, dp
+  use para,      only : distribute_calc, first_idx, last_idx, &
+                        para_merge_real, inode, nnode
 
-implicit none
+  implicit none
 
-private
-public :: cmaes_optimize
+  private
+  public :: cmaes_optimize
 
 contains
 
   ! ===========================================================================
-  SUBROUTINE cmaes_optimize(objective_func, bounds, n_params, result, n_iter)
+  SUBROUTINE cmaes_optimize(objective_func, bounds, n_params, result, n_iter, sigma_init)
     !
-    ! CMA-ES optimizer entry point.
+    ! Standard CMA-ES optimizer entry point.
     !
     ! Input:
-    !   objective_func - external function f(params, n) -> real value (minimize)
-    !   bounds(2, n_params) - lower(1,:) and upper(2,:) bounds
-    !   n_params - number of parameters to optimize
-    !   n_iter - maximum number of iterations
+    !   objective_func : external function f(params, n) -> scalar (minimize)
+    !   bounds(2, n_params) : lower(1,:) and upper(2,:)
+    !   n_params : dimension of parameter space
+    !   n_iter : maximum number of iterations
+    !   sigma_init : optional initial step-size (default 0.02)
     !
     ! Output:
-    !   result(n_params) - best solution found
+    !   result(n_params) : best solution found
     !
+    real(dp), intent(in), optional :: sigma_init
     interface
       function objective_func(params, n) result(val)
         use constants, only : dp
@@ -75,104 +60,178 @@ contains
     end interface
     !
     integer,  intent(in)  :: n_params, n_iter
-    real(dp), dimension(2, n_params), intent(in)  :: bounds
+    real(dp), dimension(2, n_params), intent(in) :: bounds
     real(dp), dimension(n_params),    intent(out) :: result
     !
-    ! CMA-ES internal state
-    real(dp), allocatable :: mean(:)      ! mean of distribution
-    real(dp), allocatable :: sigma(:)     ! step size (per dimension)
-    real(dp), allocatable :: cov(:,:)     ! covariance matrix (diagonal only in axis-parallel version)
-    real(dp), allocatable :: pc(:), ps(:) ! evolution paths
-    real(dp), allocatable :: work(:)      ! workspace
-    real(dp), allocatable :: x_pop(:), fitness(:)
-    real(dp) :: cc, c1, cmu, damps, chiN
-    integer :: lambda, mu, nfe
-    integer :: ii, jj, k, best_idx
-    real(dp) :: y_best, y_worst, u
+    ! ---- CMA-ES state ----
+    real(dp) :: xmean(n_params)              ! mean of distribution
+    real(dp) :: sigma                         ! global step-size (scalar)
+    real(dp) :: C(n_params, n_params)       ! covariance matrix (symmetric)
+    real(dp) :: B(n_params, n_params)       ! eigenvectors of C
+    real(dp) :: D(n_params)                 ! sqrt(eigenvalues) of C
+    real(dp) :: pc(n_params)                ! evolution path for C
+    real(dp) :: ps(n_params)                ! evolution path for sigma
+    !
+    ! ---- Workspace ----
+    real(dp), allocatable :: x_pop(:,:)     ! (n_params, lambda) population
+    real(dp) :: fitness(200)                  ! up to 200 (max lambda)
+    real(dp) :: y_sel(n_params, 200)        ! (x_i - mean) / sigma for selected (max mu)
+    real(dp) :: y_w(n_params)               ! weighted mean of selected (centered)
+    real(dp) :: z_tmp(n_params)             ! N(0,1) sample
+    real(dp) :: work(n_params)              ! general workspace
+    real(dp) :: eigen_work(max(1, 3*n_params)) ! workspace for dsyev
+    integer  :: lwork
+    real(dp) :: y_best, u, sqrt_term, norm_ps
+    real(dp) :: w(200)               ! recombination weights (max mu=100)
+    real(dp) :: mu_eff               ! variance-effectiveness of mu
+    real(dp) :: cc, cs, c1, cmu, damps, chiN
+    real(dp) :: sigma_arg               ! overflow-protected sigma update argument
+    integer  :: nfe, gen, kk, k, j, best_idx, info, ipop, lambda, mu
+    real(dp) :: best_individual(n_params)  ! saved best individual
     real(dp), parameter :: TOL = 1.0d-8
     !
-    ! CMA-ES parameters (standard defaults)
-    ! Use larger lambda for high-dimensional problems to maintain diversity
+    real(dp), external :: dnrm2
+    ! =========================================================================
+    ! (1) Initialize strategy parameters (Hansen 2019, weighted recombination)
+    ! =========================================================================
     if (n_params <= 20) then
-      lambda = max(20, 4 + floor(3.0_dp * log(real(n_params, dp))))
+      lambda = max(20, 4 + int(3.0_dp * log(real(n_params, dp))))
     else if (n_params <= 100) then
-      lambda = max(50, n_params / 2)  ! larger population for high-dim
+      lambda = max(50, int(real(n_params, dp) / 2.0_dp))
     else
-      lambda = max(100, n_params)  ! very large population for very high-dim
+      lambda = max(100, n_params)
     endif
-    mu = lambda / 2                                               ! parents
+    mu = lambda / 2
     !
-    ! Allocation
-    allocate(mean(n_params), sigma(n_params))
-    allocate(cov(n_params, n_params), pc(n_params), ps(n_params))
-    allocate(work(n_params), x_pop(n_params * lambda), fitness(lambda))
-    !
-    ! Initialize
-    cc = 4.0_dp / (real(n_params, dp) + 4.0_dp)
-    c1 = 2.0_dp / ((real(n_params, dp) + 1.3_dp)**2 + mu)
-    cmu = min(1.0_dp - c1, 2.0_dp * (mu - 2.0_dp + 1.0_dp/mu) / &
-                  ((real(n_params, dp) + 2.0_dp)**2 + mu))
-    damps = 1.0_dp + 2.0_dp * max(0.0_dp, sqrt(real(mu-1,dp)) - 1.0_dp) + cc
-    chiN = sqrt(real(n_params, dp)) * (1.0_dp - 1.0_dp/(4.0_dp*n_params) + 1.0_dp/(21.0_dp*n_params**2))
-    !
-    ! Initialize mean at center of bounds
-    do ii = 1, n_params
-      mean(ii) = 0.5_dp * (bounds(1, ii) + bounds(2, ii))
+    ! Equal weights (mu_eff = mu for equal weights)
+    mu_eff = real(mu, dp)
+    do j = 1, mu
+      w(j) = 1.0_dp / real(mu, dp)
     enddo
-    sigma = 0.3_dp * (bounds(2, :) - bounds(1, :))  ! 30% of range
-    cov = 0.0_dp
-    do ii = 1, n_params
-      cov(ii, ii) = sigma(ii)**2
+    !
+    ! Learning rates (Hansen 2019, symmetric)
+    cc   = (4.0_dp + mu_eff) / (real(n_params, dp) + 4.0_dp + 2.0_dp * mu_eff)
+    cs   = (mu_eff + 2.0_dp) / (real(n_params, dp) + mu_eff + 5.0_dp)
+    c1   = 2.0_dp / ((real(n_params, dp) + 1.3_dp)**2 + mu_eff)
+    cmu  = min(1.0_dp - c1, &
+               2.0_dp * (mu_eff - 2.0_dp + 1.0_dp/mu_eff) / &
+               ((real(n_params, dp) + 2.0_dp)**2 + mu_eff))
+    damps = (1.0_dp + 2.0_dp * max(0.0_dp, sqrt(mu_eff) - 1.0_dp)) / cs &
+            + 0.0_dp
+    chiN = sqrt(real(n_params, dp)) * &
+           (1.0_dp - 1.0_dp / (4.0_dp * real(n_params, dp)) &
+                    + 1.0_dp / (21.0_dp * real(n_params, dp)**2))
+    !
+    ! =========================================================================
+    ! (2) Initialize state
+    ! =========================================================================
+    ! Mean at center of bounds
+    do j = 1, n_params
+      xmean(j) = 0.5_dp * (bounds(1, j) + bounds(2, j))
     enddo
+    !
+    ! Initial step-size: use provided value or default 0.02
+    if (present(sigma_init)) then
+      sigma = sigma_init
+    else
+      sigma = 0.02_dp
+    endif
+    !
+    ! Initial covariance: identity (isotropic)
+    C = 0.0_dp
+    do j = 1, n_params
+      C(j, j) = 1.0_dp
+    enddo
+    B = C
+    D = 1.0_dp
     pc = 0.0_dp
     ps = 0.0_dp
+    !
+    ! Allocate population
+    allocate(x_pop(n_params, lambda))
     !
     y_best = 1.0d30
     nfe = 0
     best_idx = 1
+    lwork = max(1, 3*n_params)
+    best_individual = xmean  ! initial best guess
     !
-    write(stdout, '(A,I6,A)') "  CMA-ES: n_params=", n_params, " lambda=", lambda
+    write(stdout, '(A,I6,A,I6,A,I6)') &
+          "  CMA-ES: n_params=", n_params, " lambda=", lambda, " mu=", mu
+    write(stdout, '(A,4(G10.3,A))') &
+          "  cs=", cs, "  cc=", cc, "  c1=", c1, "  cmu=", cmu
+    write(stdout, '(A,G10.3,A,G10.3)') &
+          "  damps=", damps, "  chiN=", chiN
     !
-    ! CMA-ES main loop
-    do ii = 1, n_iter
+    ! =========================================================================
+    ! (3) Main CMA-ES loop
+    ! =========================================================================
+    main_loop: do gen = 1, n_iter
       !
-      ! Sample lambda offspring (done by rank 0, broadcast to others via para_sync)
+      ! ---- (3a) Sample lambda individuals from N(m, sigma^2 * C) ----
+      ! x_k = m + sigma * B * D * z_k,   z_k ~ N(0, I)
       if (inode == 0) then
         do k = 1, lambda
-          do jj = 1, n_params
+          !
+          ! Sample z_k ~ N(0, I) via Box-Muller (polar form)
+          do j = 1, n_params
             call random_number(u)
-            x_pop((k-1)*n_params + jj) = mean(jj) + sigma(jj) * (u - 0.5_dp) * sqrt(12.0_dp)
-            ! Clip to bounds
-            x_pop((k-1)*n_params + jj) = max(bounds(1,jj), min(bounds(2,jj), &
-                                             x_pop((k-1)*n_params + jj)))
+            u = max(u, 1.0d-20)
+            z_tmp(j) = sqrt(-2.0_dp * log(u))
+            call random_number(u)
+            z_tmp(j) = z_tmp(j) * cos(6.28318530718_dp * u)
+          enddo
+          !
+          ! y = D * z  (scaling by sqrt(eigenvalue))
+          do j = 1, n_params
+            work(j) = D(j) * z_tmp(j)
+          enddo
+          !
+          ! x = m + sigma * B * y  via dgemv
+          call dgemv('N', n_params, n_params, &
+                     sigma, B, n_params, work, 1, &
+                     0.0_dp, x_pop(1, k), 1)
+          !
+          ! Add mean
+          do j = 1, n_params
+            x_pop(j, k) = xmean(j) + x_pop(j, k)
+          enddo
+        enddo
+        !
+        ! Re-sample any out-of-bounds individuals (reflection)
+        do k = 1, lambda
+          do j = 1, n_params
+            if (x_pop(j, k) < bounds(1, j)) then
+              x_pop(j, k) = bounds(1, j) + (bounds(1, j) - x_pop(j, k))
+              x_pop(j, k) = min(x_pop(j, k), bounds(2, j))
+            else if (x_pop(j, k) > bounds(2, j)) then
+              x_pop(j, k) = bounds(2, j) - (x_pop(j, k) - bounds(2, j))
+              x_pop(j, k) = max(x_pop(j, k), bounds(1, j))
+            endif
           enddo
         enddo
       endif
       !
-      ! Distribute fitness evaluations across MPI ranks
+      ! ---- (3b) Distribute fitness evaluations across MPI ranks ----
       call distribute_calc(lambda)
+      fitness(1:lambda) = 0.0_dp
       !
-      ! Initialize fitness to 0 (unevaluated positions will sum to 0 across ranks)
-      fitness = 0.0_dp
-      !
-      ! Each rank evaluates its assigned individuals
       do k = first_idx, last_idx
-        fitness(k) = objective_func(x_pop((k-1)*n_params+1 : k*n_params), n_params)
+        fitness(k) = objective_func(x_pop(1, k), n_params)
         nfe = nfe + 1
       enddo
       !
-      ! Merge fitness values from all ranks
+      ! Merge from all ranks
       call para_merge_real(fitness, lambda)
-      nfe = nfe / int(nnode, dp)  ! approximate: each rank counted its portion
       !
-      ! Sort by fitness (ascending) - simple bubble sort
-      do jj = 1, lambda-1
-        do k = jj+1, lambda
-          if (fitness(k) < fitness(jj)) then
-            u = fitness(jj); fitness(jj) = fitness(k); fitness(k) = u
-            work = x_pop((jj-1)*n_params+1 : jj*n_params)
-            x_pop((jj-1)*n_params+1 : jj*n_params) = x_pop((k-1)*n_params+1 : k*n_params)
-            x_pop((k-1)*n_params+1 : k*n_params) = work
+      ! ---- (3c) Sort by fitness (ascending) ----
+      do j = 1, lambda - 1
+        do k = j + 1, lambda
+          if (fitness(k) < fitness(j)) then
+            u = fitness(j); fitness(j) = fitness(k); fitness(k) = u
+            work = x_pop(:, j)
+            x_pop(:, j) = x_pop(:, k)
+            x_pop(:, k) = work
           endif
         enddo
       enddo
@@ -180,67 +239,109 @@ contains
       if (fitness(1) < y_best) then
         y_best = fitness(1)
         best_idx = 1
+        best_individual = x_pop(:, 1)  ! save the best individual
       endif
       !
-      ! Update mean (weighted combination of top mu)
-      work = 0.0_dp
+      ! ---- (3d) Compute centered selected individuals: y_sel = (x_i - m) / sigma ----
       do k = 1, mu
-        work = work + x_pop((k-1)*n_params+1 : k*n_params)
-      enddo
-      work = work / real(mu, dp)
-      !
-      ! Update evolution paths
-      pc = (1.0_dp - cc) * pc + sqrt(cc * (2.0_dp - cc)) * (work - mean) / sigma
-      ps = (1.0_dp - 1.0_dp/damps) * ps + &
-           sqrt(cc * (2.0_dp - cc)) * sqrt(real(mu, dp)) * (work - mean) / sigma
-      !
-      ! Update covariance matrix
-      cov = (1.0_dp - c1 - cmu) * cov + &
-            c1 * (outer_product(pc, pc) + (1.0_dp - 1.0_dp/(4.0_dp*n_params))*cov) + &
-            cmu * (1.0_dp/mu) * outer_diag_sum(x_pop, n_params, mu, bounds)
-      !
-      ! Update step size (axis-parallel only for simplicity)
-      sigma = sigma * exp((norm2(ps) - chiN) / (sqrt(real(n_params,dp)) * damps))
-      sigma = max(0.01_dp * (bounds(2,:) - bounds(1,:)), &
-                  min(0.5_dp * (bounds(2,:) - bounds(1,:)), sigma))
-      !
-      mean = work
-      !
-      if (mod(ii, 10) == 0 .or. ii == n_iter) then
-        write(stdout, '(A,I5,A,G14.6)') "  CMA-ES iter ", ii, "  f_best=", y_best
-      endif
-      !
-      ! Check convergence
-      if (y_best < TOL) exit
-      !
-    enddo
-    !
-    result = x_pop(1:n_params)
-    write(stdout, '(A,G14.6,A,I8)') "  CMA-ES done. f_best=", y_best, "  nfe=", nfe
-    !
-    deallocate(mean, sigma, cov, pc, ps, work, x_pop, fitness)
-    !
-  CONTAINS
-    !
-    pure function outer_product(a, b) result(c)
-      real(dp), intent(in) :: a(:), b(:)
-      real(dp) :: c(size(a), size(b))
-      integer :: i, j
-      do i = 1, size(a); do j = 1, size(b); c(i,j) = a(i) * b(j); enddo; enddo
-    end function outer_product
-    !
-    function outer_diag_sum(x_arr, n, m, bnds) result(c)
-      integer, intent(in) :: n, m
-      real(dp), intent(in) :: x_arr(n*m), bnds(2,n)
-      real(dp) :: c(n,n)
-      integer :: k, jj
-      c = 0.0_dp
-      do k = 1, m
-        do jj = 1, n
-          c(jj,jj) = c(jj,jj) + (x_arr((k-1)*n+jj) - 0.5_dp*(bnds(1,jj)+bnds(2,jj)))**2
+        do j = 1, n_params
+          y_sel(j, k) = (x_pop(j, k) - xmean(j)) / sigma
         enddo
       enddo
-    end function outer_diag_sum
+      !
+      ! ---- (3e) Weighted mean of centered selected individuals ----
+      y_w = 0.0_dp
+      do k = 1, mu
+        do j = 1, n_params
+          y_w(j) = y_w(j) + w(k) * y_sel(j, k)
+        enddo
+      enddo
+      !
+      ! ---- (3f) Update evolution path pc (for covariance) ----
+      ! pc = (1 - cc) * pc + sqrt(cc * (2 - cc) * mu_eff) * y_w
+      sqrt_term = sqrt(cc * (2.0_dp - cc) * mu_eff)
+      do j = 1, n_params
+        pc(j) = (1.0_dp - cc) * pc(j) + sqrt_term * y_w(j)
+      enddo
+      !
+      ! ---- (3g) Update evolution path ps (for sigma) ----
+      ! ps = (1 - cs) * ps + sqrt(cs * (2 - cs) * mu_eff) * B * D^{-1} * y_w
+      do j = 1, n_params
+        work(j) = y_w(j) / max(D(j), 1.0d-10)
+      enddo
+      call dgemv('N', n_params, n_params, &
+                 1.0_dp, B, n_params, work, 1, &
+                 0.0_dp, y_w, 1)
+      sqrt_term = sqrt(cs * (2.0_dp - cs) * mu_eff)
+      do j = 1, n_params
+        ps(j) = (1.0_dp - cs) * ps(j) + sqrt_term * y_w(j)
+      enddo
+      norm_ps = dnrm2(n_params, ps, 1)
+      !
+      ! ---- (3h) Update covariance matrix C ----
+      do j = 1, n_params
+        do k = 1, n_params
+          C(j, k) = (1.0_dp - c1 - cmu) * C(j, k)
+        enddo
+      enddo
+      call dger(n_params, n_params, c1, pc, 1, pc, 1, C, n_params)
+      do k = 1, mu
+        call dger(n_params, n_params, cmu * w(k), y_sel(1, k), 1, y_sel(1, k), 1, C, n_params)
+      enddo
+      !
+      ! ---- (3i) Ensure C is symmetric and positive definite ----
+      do j = 1, n_params
+        C(j, j) = max(C(j, j), 1.0d-8)
+        do k = j + 1, n_params
+          C(j, k) = 0.5_dp * (C(j, k) + C(k, j))
+          C(k, j) = C(j, k)
+        enddo
+      enddo
+      !
+      ! ---- (3j) Eigendecomposition: C = B * D^2 * B^T ----
+      call dsyev('V', 'U', n_params, C, n_params, D, eigen_work, lwork, info)
+      if (info /= 0) then
+        write(stdout, '(A,I5)') "  CMA-ES WARNING: dsyev failed, info=", info
+        D = 1.0_dp
+        C = 0.0_dp
+        do j = 1, n_params; C(j, j) = 1.0_dp; enddo
+      endif
+      B = C
+      D = sqrt(max(D, 0.0_dp))
+      !
+      ! ---- (3k) Update step-size sigma ----
+      sigma_arg = ((norm_ps / chiN) - 1.0_dp) * cs / damps
+      sigma_arg = max(-2.0_dp, min(sigma_arg, 2.0_dp)) ! limit growth: sigma changes by at most exp(2)≈7
+      sigma = sigma * exp(sigma_arg)
+      sigma = max(1.0d-10, min(sigma, 1.0d4))
+      !
+      ! ---- (3l) Update mean ----
+      do j = 1, n_params
+        xmean(j) = xmean(j) + sigma * pc(j)
+      enddo
+      ! Soft bound: keep mean within bounds
+      do j = 1, n_params
+        xmean(j) = max(bounds(1, j), min(bounds(2, j), xmean(j)))
+      enddo
+      !
+      ! ---- Progress output (every 10 generations) ----
+      if (mod(gen, 10) == 0 .or. gen == n_iter) then
+        write(stdout, '(A,I5,A,G14.6,A,G14.6,A,G14.6)') &
+              "  CMA-ES gen ", gen, "  f_best=", y_best, &
+              "  sigma=", sigma, "  ||ps||=", norm_ps
+      endif
+      !
+      ! ---- Convergence check ----
+      if (y_best < TOL) exit main_loop
+      !
+    enddo main_loop
+    !
+    ! Return best individual
+    result = best_individual
+    write(stdout, '(A,G14.6,A,I8)') &
+          "  CMA-ES done. f_best=", y_best, "  nfe=", nfe
+    !
+    deallocate(x_pop)
     !
   END SUBROUTINE cmaes_optimize
 

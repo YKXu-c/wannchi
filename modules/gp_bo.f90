@@ -619,7 +619,7 @@ CONTAINS
         best_idx = ii
       endif
       if (mod(ii, 5) == 0) then
-        write(stdout, '(A,1I4,A,1G14.6)') "  # Bayes init ", ii, "  f_best=", y_best
+        write(stdout, '(A,I4,A,G14.6)') "  # Bayes init ", ii, "  f_best=", y_best
       endif
     enddo
     !
@@ -682,14 +682,14 @@ CONTAINS
       endif
       !
       if (mod(ii, 10) == 0 .or. ii == n_iter) then
-        write(stdout, '(A,1I4,A,G14.6,A,G14.6)') "  # Bayes iter ", ii, &
+        write(stdout, '(A,I4,A,G14.6,A,G14.6)') "  # Bayes iter ", ii, &
               "  EI=", ei_best, "  f_best=", y_best
         ! Re-optimize GP length scale periodically for high-dimensional problems
         if (n_params > 10 .and. mod(ii, 10) == 0) then
           call gp_optimize_ls(gp, bounds, n_params)
         endif
       else
-        write(stdout, '(A,1I4,A,G14.6,A,G14.6)') "  # Bayes iter ", ii, &
+        write(stdout, '(A,I4,A,G14.6,A,G14.6)') "  # Bayes iter ", ii, &
               "  L2=", y_val, "  best=", y_best
       endif
       !

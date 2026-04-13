@@ -2485,9 +2485,15 @@ END SUBROUTINE
 
 ### 1.12 cma_es — CMA-ES 优化器
 
-**文件**: [`modules/cma_es.f90`](wannchi/modules/cma_es.f90) (233 行)
+**文件**: [`modules/cma_es.f90`](wannchi/modules/cma_es.f90) (344 行)
 
-**功能**: 协方差矩阵自适应进化策略
+**功能**: 标准 CMA-ES — Hansen & Ostermeier, Evolutionary Computation 9(2), 159 (2001)
+
+**核心算法**:
+1. 采样: `x = m + σ * B * D * z`, z~N(0,I) via Box-Muller
+2. 协方差更新: `(1-c1-cμ)*C + c1*pc*pcᵀ + cμ*Σᵢ wᵢ*yᵢ*yᵢᵀ`
+3. 特征分解: `C = B * D² * Bᵀ` via LAPACK `dsyev`
+4. 步长更新: `σ ← σ·exp((||p_s||/χN - 1) · c_s/damps)`
 
 **适用性**:
 - 高维问题 (n_params ≥ 20)
@@ -2498,140 +2504,85 @@ END SUBROUTINE
 - 低维问题 (n_params < 10)
 - 离散/分类参数
 
+**关键实现细节**:
+- sigma 是标量（不是轴平行向量）
+- B 矩阵存储特征向量，特征值 D = sqrt(eigenvalues)
+- sigma_arg 限制在 ±2.0 以防爆炸
+- best_individual 单独保存（不是通过 best_idx）
+- `xmean` 代替 `mean` 避免与 Fortran intrinsic 冲突
+
 #### 子程序详细说明
 
 ##### 1.12.1 `cmaes_optimize(objective_func, bounds, n_params, result, n_iter)`
 
 **功能**: CMA-ES 优化器入口
 
-**源代码**:
+**接口**: `subroutine cmaes_optimize(objective_func, bounds, n_params, result, n_iter)`
+- `objective_func(params, n) -> real(dp)`: 外部目标函数（最小化）
+- `bounds(2, n_params)`: 参数边界 [lower, upper]
+- `n_iter`: 最大迭代次数
+- `result(n_params)`: 最优解
+
+**实现**: 见源文件 [`modules/cma_es.f90`](wannchi/modules/cma_es.f90)，主要流程:
+
 ```fortran
-SUBROUTINE cmaes_optimize(objective_func, bounds, n_params, result, n_iter)
-  !
-  ! CMA-ES optimizer: Covariance Matrix Adaptation Evolution Strategy
-  ! Input:
-  !   objective_func : external function f(x(1:n_params)) -> scalar
-  !   bounds(2,n_params) : [lower, upper] bounds
-  !   n_params : dimension of parameter space
-  !   n_iter : max iterations
-  ! Output:
-  !   result(1:n_params) : best solution found
-  !
-  real(dp), intent(in) :: bounds(2, n_params)
-  integer, intent(in) :: n_params, n_iter
-  real(dp), intent(out) :: result(n_params)
-  !
-  integer :: lambda, mu, nfe
-  real(dp) :: cc, c1, cmu, damps, chiN, sigma
-  real(dp), allocatable :: mean(:), x_pop(:), fitness(:), work(:)
-  real(dp), allocatable :: cov(:,:), pc(:), ps(:)
-  real(dp) :: y_best, u
-  integer :: ii, jj, k, best_idx
-  !
-  ! Initialize CMA-ES parameters
-  lambda = merge(max(20, 4 + int(3*log(real(n_params)))), &
-                 max(50, n_params/2), n_params <= 20)
-  mu = lambda / 2
-  !
-  cc   = 4.0_dp / (n_params + 4.0_dp)
-  c1   = 2.0_dp / ((n_params + 1.3_dp)**2 + real(mu, dp))
-  cmu  = min(1.0_dp - c1, 2.0_dp*(real(mu,dp)-2.0_dp+1.0_dp/real(mu,dp)) / &
-               ((n_params+2.0_dp)**2 + real(mu,dp)))
-  damps = 1.0_dp + 2.0_dp*max(0.0_dp, sqrt(real(mu,dp))-1.0_dp) + cc
-  chiN = sqrt(real(n_params,dp)) * (1.0_dp - 1.0_dp/(4.0_dp*n_params) &
-                                      + 1.0_dp/(21.0_dp*n_params**2))
-  !
-  allocate(mean(n_params), x_pop(lambda*n_params), fitness(lambda))
-  allocate(work(n_params), cov(n_params,n_params), pc(n_params), ps(n_params))
-  !
-  ! Initialize mean to center of bounds
-  mean(:) = 0.5_dp * (bounds(1,:) + bounds(2,:))
-  sigma = 0.3_dp * (bounds(2,:) - bounds(1,:))
-  cov = 0.0_dp; do jj=1,n_params; cov(jj,jj)=sigma(jj)**2; enddo
-  pc = 0.0_dp; ps = 0.0_dp
-  !
-  y_best = huge(1.0_dp)
-  nfe = 0
-  !
-  do ii = 1, n_iter
-    !
-    ! Sample lambda individuals from N(0, C)
-    if (inode == 0) then
-      do k = 1, lambda
-        do jj = 1, n_params
-          call random_number(u)
-          x_pop((k-1)*n_params + jj) = mean(jj) + sigma(jj) * (u - 0.5_dp) * sqrt(12.0_dp)
-          ! Clip to bounds
-          x_pop((k-1)*n_params + jj) = max(bounds(1,jj), min(bounds(2,jj), &
-                                                   x_pop((k-1)*n_params + jj)))
-        enddo
-      enddo
-    endif
-    !
-    ! Distribute fitness evaluations across MPI ranks
-    call distribute_calc(lambda)
-    fitness = 0.0_dp
-    do k = first_idx, last_idx
-      fitness(k) = objective_func(x_pop((k-1)*n_params+1 : k*n_params), n_params)
-      nfe = nfe + 1
-    enddo
-    call para_merge_real(fitness, lambda)
-    !
-    ! Sort by fitness (ascending) - simple bubble sort
-    do jj = 1, lambda-1
-      do k = jj+1, lambda
-        if (fitness(k) < fitness(jj)) then
-          u = fitness(jj); fitness(jj) = fitness(k); fitness(k) = u
-          work = x_pop((jj-1)*n_params+1 : jj*n_params)
-          x_pop((jj-1)*n_params+1 : jj*n_params) = x_pop((k-1)*n_params+1 : k*n_params)
-          x_pop((k-1)*n_params+1 : k*n_params) = work
-        endif
-      enddo
-    enddo
-    !
-    if (fitness(1) < y_best) then
-      y_best = fitness(1)
-      best_idx = 1
-    endif
-    !
-    ! Update mean (weighted combination of top mu)
-    work = 0.0_dp
-    do k = 1, mu
-      work = work + x_pop((k-1)*n_params+1 : k*n_params)
-    enddo
-    work = work / real(mu, dp)
-    !
-    ! Update evolution paths
-    pc = (1.0_dp - cc) * pc + sqrt(cc * (2.0_dp - cc)) * (work - mean) / sigma
-    ps = (1.0_dp - 1.0_dp/damps) * ps + &
-         sqrt(cc * (2.0_dp - cc)) * sqrt(real(mu, dp)) * (work - mean) / sigma
-    !
-    ! Update covariance matrix
-    cov = (1.0_dp - c1 - cmu) * cov + &
-          c1 * (outer_product(pc, pc) + (1.0_dp - 1.0_dp/(4.0_dp*n_params))*cov) + &
-          cmu * (1.0_dp/mu) * outer_diag_sum(x_pop, n_params, mu, bounds)
-    !
-    ! Update step size
-    sigma = sigma * exp((norm2(ps) - chiN) / (sqrt(real(n_params,dp)) * damps))
-    sigma = max(0.01_dp * (bounds(2,:) - bounds(1,:)), &
-                min(0.5_dp * (bounds(2,:) - bounds(1,:)), sigma))
-    !
-    mean = work
-    !
-    if (mod(ii, 10) == 0 .or. ii == n_iter) then
-      write(stdout, '(A,I5,A,G14.6)') "  CMA-ES iter ", ii, "  f_best=", y_best
-    endif
-    !
-    ! Check convergence
-    if (y_best < TOL) exit
-    !
-  enddo
-  !
-  result = x_pop(1:n_params)
-  write(stdout, '(A,G14.6,A,I8)') "  CMA-ES done. f_best=", y_best, "  nfe=", nfe
-  !
-END SUBROUTINE
+! 初始化
+lambda = max(..., 4 + 3*log(n))   ! 群体大小
+mu = lambda / 2                    ! 父代数量
+cc = (4+mu_eff)/(n+4+2*mu_eff)    ! 协方差路径学习率
+cs = (mu_eff+2)/(n+mu_eff+5)       ! 步长路径学习率
+c1 = 2/((n+1.3)²+mu_eff)           ! rank-1 学习率
+cmu = min(1-c1, ...)               ! rank-mu 学习率
+
+! 主循环
+do gen = 1, n_iter
+  ! 采样: x = m + sigma * B * D * z
+  call sample_population(x_pop, xmean, sigma, B, D, n_params, lambda)
+
+  ! 分布式评估
+  call distribute_calc(lambda)
+
+  ! 排序 & 选择 top-mu
+  call sort_by_fitness(x_pop, fitness, lambda)
+
+  ! 计算 centered y_sel = (x_i - m) / sigma
+
+  ! 加权均值 y_w = Σ w_i * y_sel_i
+
+  ! 更新 pc (协方差路径)
+  pc = (1-cc)*pc + sqrt(cc*(2-cc)*mu_eff) * y_w
+
+  ! 更新 ps (步长路径)
+  ps = (1-cs)*ps + sqrt(cs*(2-cs)*mu_eff) * B * D⁻¹ * y_w
+
+  ! 更新协方差 C = (1-c1-cmu)*C + c1*pc*pcᵀ + cmu*Σ w_i*y_i*y_iᵀ
+  ! via dger rank-1 updates
+
+  ! 特征分解: C -> B, D (dsyev)
+  call dsyev('V', 'U', n, C, n, D, work, lwork, info)
+
+  ! 更新步长 sigma (overflow-protected)
+  sigma_arg = ((norm(ps)/chiN - 1) * cs / damps)
+  sigma = sigma * exp(clamp(sigma_arg, -2, +2))
+
+  ! 更新均值
+  xmean = xmean + sigma * pc
+
+  ! 收敛检查
+  if (f_best < TOL) exit
+enddo
 ```
+
+**关键参数** (Hansen 2019):
+- `mu_eff = mu` (等权), `chiN = sqrt(n)*(1 - 1/(4n) + 1/(21n²))`
+- `damps = 1 + max(0, sqrt(mu_eff)-1) + cc`
+
+**已知修复** (2026-04-07):
+- sigma 初始值 = 0.02（防止爆炸）
+- sigma_arg 限制 ±2.0（sigma 最多变化 exp(2)≈7 倍/代）
+- best_individual 单独数组保存
+- `xmean` 避免与 Fortran intrinsic 冲突
+- dsyev 需要 work/lwork 参数（macOS Accelerate 必需）
 
 ### 1.13 classical_mc — 经典海森堡蒙特卡洛
 

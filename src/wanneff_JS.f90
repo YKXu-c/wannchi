@@ -530,6 +530,7 @@ PROGRAM WannEffJS
                                J_bounds, S_bounds, mc_supercell, sigma_broadening, &
                                berry_curvature_output, &
                                ff_orbital_indices, n_ff_orbital_indices, &
+                               cma_sigma, &
                                read_qpoints, nqpt, qvec, &
                                emin, emax, nnu
   use gp_bo,           only : bayesian_optimize
@@ -823,7 +824,11 @@ PROGRAM WannEffJS
       !
       if (n_jrpt + 3 > 20) then
         write(stdout, '(A,1I5,A)') "  CMA-ES optimization: J_TENSOR (", n_jrpt+3, " params)"
-        CALL cmaes_optimize(js_objective_callback, bounds_bayes, n_jrpt+3, params_opt, bayes_niter)
+        if (cma_sigma > 0.0_dp) then
+          CALL cmaes_optimize(js_objective_callback, bounds_bayes, n_jrpt+3, params_opt, bayes_niter, sigma_init=cma_sigma)
+        else
+          CALL cmaes_optimize(js_objective_callback, bounds_bayes, n_jrpt+3, params_opt, bayes_niter)
+        endif
       else
         write(stdout, '(A,1I5,A)') "  Bayesian optimization: J_TENSOR (", n_jrpt+3, " params)"
         CALL bayesian_optimize(js_objective_callback, bounds_bayes, n_jrpt+3, params_opt, bayes_niter)
@@ -856,7 +861,11 @@ PROGRAM WannEffJS
       bounds_bayes(2, n_jrpt+1:4*n_jrpt) = S_bounds(2)
       !
       write(stdout, '(A,1I5,A)') "  CMA-ES optimization: J_S_TENSOR (", 4*n_jrpt, " params)"
-      CALL cmaes_optimize(js_objective_callback, bounds_bayes, 4*n_jrpt, params_opt, bayes_niter)
+      if (cma_sigma > 0.0_dp) then
+        CALL cmaes_optimize(js_objective_callback, bounds_bayes, 4*n_jrpt, params_opt, bayes_niter, sigma_init=cma_sigma)
+      else
+        CALL cmaes_optimize(js_objective_callback, bounds_bayes, 4*n_jrpt, params_opt, bayes_niter)
+      endif
       !
       allocate(jeff_R(n_jrpt), S_R_opt(3, n_jrpt))
       jeff_R   = params_opt(1:n_jrpt)
